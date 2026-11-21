@@ -174,11 +174,27 @@ async def test_happy_path_with_approval_signal(env: WorkflowEnvironment) -> None
 @pytest.mark.asyncio
 @bounded
 async def test_resumes_after_worker_restart(env: WorkflowEnvironment) -> None:
-    """B10 acceptance: kill the worker mid-workflow; a new worker resumes from history."""
+    """B10 acceptance: kill the worker mid-workflow; a new worker resumes from history.
+
+    Both workers run with workflow caching disabled. That removes sticky task queues (which
+    the time-skipping test server never hands over to another worker) and forces every
+    workflow task to be replayed from history, so the test also proves the workflow is
+    deterministic under replay at every step.
+    """
     fakes = Fakes()
-    agent, gateway = workers(env, fakes)
+    gateway = Worker(env.client, task_queue=GATEWAY_QUEUE, activities=[fakes.execute_tool])
+
+    def agent_worker() -> Worker:
+        return Worker(
+            env.client,
+            task_queue=AGENT_QUEUE,
+            workflows=[FeatureDeliveryWorkflow],
+            activities=fakes.agent_activities(),
+            max_cached_workflows=0,
+        )
+
     async with gateway:
-        async with agent:
+        async with agent_worker():
             handle = await env.client.start_workflow(
                 FeatureDeliveryWorkflow.run, start_input(), id=f"wf-{uuid.uuid4()}", task_queue=AGENT_QUEUE
             )
@@ -188,10 +204,7 @@ async def test_resumes_after_worker_restart(env: WorkflowEnvironment) -> None:
             FeatureDeliveryWorkflow.approval_decided,
             ApprovalDecisionSignal(approval_id=APPROVAL_ID, decision="approved"),
         )
-        fresh = Worker(
-            env.client, task_queue=AGENT_QUEUE, workflows=[FeatureDeliveryWorkflow], activities=fakes.agent_activities()
-        )
-        async with fresh:
+        async with agent_worker():
             outcome = await handle.result()
     assert outcome.status == "succeeded"
     # Steps completed before the restart were not re-run.
