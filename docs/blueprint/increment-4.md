@@ -37,5 +37,5 @@
   7 end-to-end step tests (activity → runner → metered model → gateway → PostgreSQL + S3), and sandbox
   validation of `ToolCallWorkflow`.
 - ruff, mypy --strict (71 files), import-linter, pip-audit clean; Alembic upgrades to 0004.
-- **Not run:** the golden set against real models (no keys, model ids or prices configured), and the 6 Temporal
-  tests (test server download blocked here; they run in CI).
+- **Not run:** the golden set against real models (no keys, model ids or prices configured).
+- The 6 Temporal tests, including the `ToolCallWorkflow` bridge, pass in CI (see increment-3.md).

@@ -43,7 +43,9 @@
 - The workflow module passes Temporal's sandbox validation (a deliberately non-deterministic workflow is
   rejected by the same check).
 - Alembic upgrades to 0003. ruff, mypy --strict (61 files), import-linter and pip-audit are clean.
-- **Not run here:** the 5 Temporal end-to-end tests (`tests/temporal`), including the B10 acceptance test
-  "resume after worker restart". This session's network policy blocks the Temporal test-server download
-  (temporal.download). CI runs them with `AIEOS_REQUIRE_TEMPORAL=1`, so they fail rather than skip there.
-  Run locally with `make test-temporal`.
+- Temporal end-to-end tests (`tests/temporal`) could not run in the build session, because its network policy
+  blocks the test-server download. Their first CI run (2026-11-21, PR #1) found that the restart test hung:
+  the time-skipping server never hands a sticky task queue to a new worker. That test now runs with workflow
+  caching disabled, which also replays every step from history. **All 6 pass in CI**: approval signal,
+  worker-restart resume (B10 acceptance), lost-signal polling, cancel signal, Temporal cancellation, and the
+  tool bridge. CI sets `AIEOS_REQUIRE_TEMPORAL=1`, so they fail rather than skip there.
