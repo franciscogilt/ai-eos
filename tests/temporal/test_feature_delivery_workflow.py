@@ -8,9 +8,10 @@ which case they fail.
 from __future__ import annotations
 
 import asyncio
+import functools
 import os
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import timedelta
 from typing import Any
 
@@ -91,10 +92,25 @@ class Fakes:
         ]
 
 
+TEST_TIMEOUT_SECONDS = 60
+
+
+def bounded(test: Callable[..., Awaitable[None]]) -> Callable[..., Awaitable[None]]:
+    """Fail a hanging workflow test with a traceback instead of letting it consume the CI job."""
+
+    @functools.wraps(test)
+    async def wrapper(*args: Any, **kwargs: Any) -> None:
+        await asyncio.wait_for(test(*args, **kwargs), TEST_TIMEOUT_SECONDS)
+
+    return wrapper
+
+
 @pytest_asyncio.fixture
 async def env() -> AsyncIterator[WorkflowEnvironment]:
     try:
-        environment = await WorkflowEnvironment.start_time_skipping(data_converter=pydantic_data_converter)
+        environment = await asyncio.wait_for(
+            WorkflowEnvironment.start_time_skipping(data_converter=pydantic_data_converter), timeout=120
+        )
     except RuntimeError as exc:
         if os.environ.get("AIEOS_REQUIRE_TEMPORAL") == "1":
             raise
@@ -133,6 +149,7 @@ async def wait_for_phase(handle: Any, phase: str) -> None:
 
 
 @pytest.mark.asyncio
+@bounded
 async def test_happy_path_with_approval_signal(env: WorkflowEnvironment) -> None:
     fakes = Fakes()
     agent, gateway = workers(env, fakes)
@@ -155,6 +172,7 @@ async def test_happy_path_with_approval_signal(env: WorkflowEnvironment) -> None
 
 
 @pytest.mark.asyncio
+@bounded
 async def test_resumes_after_worker_restart(env: WorkflowEnvironment) -> None:
     """B10 acceptance: kill the worker mid-workflow; a new worker resumes from history."""
     fakes = Fakes()
@@ -181,6 +199,7 @@ async def test_resumes_after_worker_restart(env: WorkflowEnvironment) -> None:
 
 
 @pytest.mark.asyncio
+@bounded
 async def test_lost_signal_recovered_by_poll(env: WorkflowEnvironment) -> None:
     fakes = Fakes()
     agent, gateway = workers(env, fakes)
@@ -196,6 +215,7 @@ async def test_lost_signal_recovered_by_poll(env: WorkflowEnvironment) -> None:
 
 
 @pytest.mark.asyncio
+@bounded
 async def test_cancel_signal_cleans_up(env: WorkflowEnvironment) -> None:
     fakes = Fakes()
     agent, gateway = workers(env, fakes)
@@ -211,6 +231,7 @@ async def test_cancel_signal_cleans_up(env: WorkflowEnvironment) -> None:
 
 
 @pytest.mark.asyncio
+@bounded
 async def test_temporal_cancel_records_cancelled(env: WorkflowEnvironment) -> None:
     fakes = Fakes()
     agent, gateway = workers(env, fakes)
@@ -229,6 +250,7 @@ async def test_temporal_cancel_records_cancelled(env: WorkflowEnvironment) -> No
 
 
 @pytest.mark.asyncio
+@bounded
 async def test_tool_bridge_runs_each_call_once(env: WorkflowEnvironment) -> None:
     from aieos.orchestration.tool_bridge import TemporalToolInvoker, ToolCallWorkflow
 

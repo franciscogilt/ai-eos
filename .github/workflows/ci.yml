@@ -58,7 +58,7 @@ jobs:
   temporal:
     # Workflow tests on Temporal's time-skipping test server (the SDK downloads it).
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 12
     env:
       AIEOS_REQUIRE_TEMPORAL: "1"  # fail, never skip, in CI
     steps:
@@ -67,7 +67,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: uv sync --locked
-      - run: uv run pytest tests/temporal -m temporal
+      - run: uv run pytest tests/temporal -m temporal -v --durations=0 --log-cli-level=INFO
 
   security:
     runs-on: ubuntu-latest
