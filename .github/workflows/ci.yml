@@ -1,0 +1,88 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# REPLACE_WITH_SHA_PINS: pin every third-party action to a full commit SHA before enabling
+# this workflow on a shared repository (supply-chain control, NIST SSDF PS.1 / PW.4).
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --locked
+      - run: uv run ruff check src tests
+      - run: uv run ruff format --check src tests
+      - run: uv run mypy
+      - run: uv run lint-imports
+      - run: uv run pytest tests/unit
+
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: ci-only-not-a-secret
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      PGPASSWORD: ci-only-not-a-secret
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --locked
+      - name: Create non-superuser owner role (mirrors production)
+        run: psql -h 127.0.0.1 -U postgres -c "CREATE ROLE aieos_owner LOGIN CREATEDB CREATEROLE PASSWORD 'ci-owner'"
+      - run: uv run pytest tests/integration
+        env:
+          ADMIN_DATABASE_URL: postgresql://aieos_owner:ci-owner@127.0.0.1:5432/postgres
+
+  temporal:
+    # Workflow tests on Temporal's time-skipping test server (the SDK downloads it).
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      AIEOS_REQUIRE_TEMPORAL: "1"  # fail, never skip, in CI
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --locked
+      - run: uv run pytest tests/temporal -m temporal
+
+  security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --locked
+      - name: Dependency vulnerabilities
+        run: uv run pip-audit
+      - name: Secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

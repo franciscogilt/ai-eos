@@ -1,0 +1,33 @@
+# Model routing. Read by aieos.providers.config.load_routing_config.
+# Nothing routes until each provider/profile has a model id AND that model has a price:
+# prices make budgets enforceable, so unpriced models are refused.
+api_version: aieos/v1
+
+providers:
+  openai:
+    kind: openai                 # Responses API
+    api_key_env: OPENAI_API_KEY
+    timeout_seconds: 120
+  # Second provider for independent QA/Security review. The slot is named "anthropic" to match the
+  # current qa_security contract; point it at any OpenAI-compatible endpoint (vendor API or gateway).
+  anthropic:
+    kind: openai_compatible      # Chat Completions at SECONDARY_PROVIDER_BASE_URL
+    api_key_env: SECONDARY_PROVIDER_API_KEY
+    base_url_env: SECONDARY_PROVIDER_BASE_URL
+    timeout_seconds: 180
+
+# Model id per provider and profile. Contracts choose the provider; this chooses the model id.
+# REPLACE before first use. Example shape:
+models: {}
+#  openai:
+#    reasoning_high: REPLACE_model_id
+#    reasoning_standard: REPLACE_model_id
+#  anthropic:
+#    reasoning_high: REPLACE_model_id
+
+# USD per million tokens, copied from each provider's current price list. REPLACE before first use.
+pricing: {}
+#  openai/REPLACE_model_id: {input_per_mtok: 0, cached_input_per_mtok: 0, output_per_mtok: 0}
+
+circuit_breaker_failures: 5
+circuit_breaker_reset_seconds: 30

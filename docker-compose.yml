@@ -1,0 +1,144 @@
+# Local development infrastructure for AI-EOS (Milestone 1).
+# `make up` starts infrastructure only. `make up-api` adds the API (profile "app").
+# All ports bind to 127.0.0.1. Values come from .env (copy .env.example).
+name: aieos
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?set in .env}
+      AIEOS_OWNER_PASSWORD: ${AIEOS_OWNER_PASSWORD:?set in .env}
+      AIEOS_API_PASSWORD: ${AIEOS_API_PASSWORD:?set in .env}
+    ports: ["127.0.0.1:5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infrastructure/docker/postgres/init-roles.sh:/docker-entrypoint-initdb.d/10-init-roles.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d aieos"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Temporal dev server (local only; AWS uses Temporal Cloud). UI on :8233.
+  # REPLACE_WITH_PINNED_TAG: pin to a specific CLI release before sharing this file.
+  temporal:
+    image: temporalio/temporal:latest
+    command: ["server", "start-dev", "--ip", "0.0.0.0", "--db-filename", "/data/temporal.db",
+              "--namespace", "aieos-local"]
+    ports: ["127.0.0.1:7233:7233", "127.0.0.1:8233:8233"]
+    volumes: [temporaldata:/data]
+
+  # S3-compatible store (MinIO no longer publishes community images). Path-style addressing required.
+  # REPLACE_WITH_PINNED_TAG; verify flags against the pinned VersityGW release.
+  s3:
+    image: versity/versitygw:latest
+    environment:
+      ROOT_ACCESS_KEY: ${S3_ACCESS_KEY_ID:?set in .env}
+      ROOT_SECRET_KEY: ${S3_SECRET_ACCESS_KEY:?set in .env}
+    command: ["--port", ":7070", "posix", "/data"]
+    ports: ["127.0.0.1:7070:7070"]
+    volumes: [s3data:/data]
+
+  s3-init:
+    image: amazon/aws-cli:latest
+    depends_on: [s3]
+    environment:
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY}
+      AWS_DEFAULT_REGION: us-east-1
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        for i in $(seq 1 30); do
+          aws --endpoint-url http://s3:7070 s3api head-bucket --bucket ${S3_ARTIFACT_BUCKET} 2>/dev/null && exit 0;
+          aws --endpoint-url http://s3:7070 s3 mb s3://${S3_ARTIFACT_BUCKET} && exit 0;
+          sleep 2;
+        done; exit 1
+    restart: "no"
+
+  # Tracing backend for local OTLP (production: ADOT collector -> CloudWatch / X-Ray).
+  jaeger:
+    image: jaegertracing/jaeger:latest
+    ports:
+      - "127.0.0.1:16686:16686"   # UI
+      - "127.0.0.1:4317:4317"     # OTLP gRPC
+      - "127.0.0.1:4318:4318"     # OTLP HTTP
+
+  api:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: infrastructure/docker/api.Dockerfile
+    image: aieos-api:local
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: local
+      DATABASE_URL: postgresql+psycopg://aieos_api:${AIEOS_API_PASSWORD}@postgres:5432/aieos
+      OIDC_ISSUER: ${OIDC_ISSUER:?set in .env}
+      OIDC_AUDIENCE: ${OIDC_AUDIENCE:?set in .env}
+      OIDC_JWKS_PATH: /keys/jwks.json
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      OTEL_SERVICE_NAME: aieos-api
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: aieos-local
+    volumes:
+      - ./.dev-keys/jwks.json:/keys/jwks.json:ro   # public keys only; the private key never enters the container
+    ports: ["127.0.0.1:8000:8000"]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  # Agent worker: workflows + agent/persistence activities. Holds model keys only.
+  worker-agents:
+    profiles: ["app"]
+    image: aieos-api:local
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: ["aieos-worker", "agents", "--engineering", "/app/engineering"]
+    environment: &worker-env
+      ENVIRONMENT: local
+      DATABASE_URL: postgresql+psycopg://aieos_api:${AIEOS_API_PASSWORD}@postgres:5432/aieos
+      OIDC_ISSUER: ${OIDC_ISSUER}
+      OIDC_AUDIENCE: ${OIDC_AUDIENCE}
+      OIDC_JWKS_PATH: /keys/jwks.json
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: aieos-local
+    volumes: &worker-volumes
+      - ./.dev-keys/jwks.json:/keys/jwks.json:ro
+      - ./engineering:/app/engineering:ro
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  # Tool-gateway worker: the only process that will hold GitHub/AWS credentials (B13).
+  worker-gateway:
+    profiles: ["app"]
+    image: aieos-api:local
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: ["aieos-worker", "gateway", "--engineering", "/app/engineering"]
+    environment:
+      <<: *worker-env
+      S3_ARTIFACT_BUCKET: ${S3_ARTIFACT_BUCKET}
+      S3_ENDPOINT_URL: http://s3:7070
+      S3_FORCE_PATH_STYLE: "true"
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY}
+    volumes: *worker-volumes
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+volumes:
+  pgdata:
+  temporaldata:
+  s3data:

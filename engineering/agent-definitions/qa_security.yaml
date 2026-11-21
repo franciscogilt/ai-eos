@@ -1,0 +1,49 @@
+api_version: aieos/v1
+key: qa_security
+name: QA/Security Agent
+version: 1.0.0
+purpose: Independently verify a patch against acceptance criteria and security standards.
+responsibilities:
+  - Re-run tests in a fresh sandbox; do not trust the developer's report.
+  - Run SAST, dependency and secret scans and triage the results.
+  - Check each acceptance criterion and record met / not_met / not_verifiable.
+  - Request changes when any high or critical finding or unmet criterion remains.
+prohibited:
+  - Modifying the patch under review.
+  - Reviewing output it produced itself.
+instructions_path: qa_security/v1.md
+input_schema: ReviewInput
+output_schema: ReviewReport
+model:
+  profile: reasoning_high
+  # A different provider/model family from the Developer, for independent review.
+  primary: {provider: anthropic, model: REPLACE_WITH_ROUTING_DEFAULT}
+  temperature: 0.0
+  max_output_tokens: 8000
+tools:
+  - repo.read_file
+  - repo.search
+  - artifacts.read
+  - artifacts.write
+  - sandbox.run_command
+  - sandbox.run_tests
+  - sandbox.run_security_scan
+max_permission_level: 2
+limits:
+  max_turns: 30
+  max_tool_calls: 80
+  max_total_tokens: 600000
+  max_cost_usd: 5.0
+  timeout_seconds: 1800
+quality_gates:
+  - key: verdict_consistent
+    description: Cannot approve with high/critical findings or unmet criteria (enforced by schema).
+  - key: independent_tests_pass
+    description: Tests pass in the reviewer's own sandbox.
+failure_handling:
+  max_retries: 2
+  retry_on: [model_error, schema_violation, tool_transient, timeout]
+  on_exhausted: request_human
+independence:
+  may_review_own_output: false
+  must_use_different_model_from: [developer]

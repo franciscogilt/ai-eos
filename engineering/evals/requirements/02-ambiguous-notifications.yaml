@@ -1,0 +1,6 @@
+id: ambiguous-notifications
+agent: requirements
+request: |
+  Users should get notified when something important happens.
+expect:
+  blocking_questions: true

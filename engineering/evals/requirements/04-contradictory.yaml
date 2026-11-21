@@ -1,0 +1,7 @@
+id: contradictory-retention
+agent: requirements
+request: |
+  Keep every uploaded file forever for audit purposes. Uploaded files must be deleted after 30 days
+  to comply with our privacy policy.
+expect:
+  blocking_questions: true

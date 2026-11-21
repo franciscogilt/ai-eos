@@ -1,0 +1,37 @@
+name: agent-evals
+
+# Golden-set evaluation against real models. Manual only: it spends money (capped by --max-usd)
+# and needs provider keys. Configure model ids and prices in engineering/model-routing.yaml first.
+on:
+  workflow_dispatch:
+    inputs:
+      max_usd:
+        description: "Hard USD cap for the whole suite"
+        default: "2"
+
+permissions:
+  contents: read
+
+jobs:
+  requirements:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: evals  # REPLACE: create this environment and store the secrets there
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --locked
+      - run: >-
+          uv run aieos-eval --agent requirements --cases engineering/evals/requirements
+          --max-usd "${{ inputs.max_usd }}" --report eval-requirements.json
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          SECONDARY_PROVIDER_API_KEY: ${{ secrets.SECONDARY_PROVIDER_API_KEY }}
+          SECONDARY_PROVIDER_BASE_URL: ${{ vars.SECONDARY_PROVIDER_BASE_URL }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-requirements
+          path: eval-requirements.json

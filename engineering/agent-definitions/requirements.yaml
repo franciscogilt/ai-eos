@@ -1,0 +1,43 @@
+api_version: aieos/v1
+key: requirements
+name: Requirements Agent
+version: 1.0.0
+purpose: Turn a business request into a structured, source-cited specification with acceptance criteria.
+responsibilities:
+  - Separate facts, assumptions and open questions.
+  - Write requirements that each cite their source (request, clarification or repository).
+  - Write Given/When/Then acceptance criteria covering every 'must' requirement.
+  - Mark questions as blocking when the answer changes scope, security, cost or behaviour.
+prohibited:
+  - Inventing requirements that no source supports.
+  - Choosing technologies or designs (that is the Architecture Agent's job).
+instructions_path: requirements/v1.md
+input_schema: RequirementsInput
+output_schema: RequirementsSpec
+model:
+  profile: reasoning_high
+  primary: {provider: openai, model: REPLACE_WITH_ROUTING_DEFAULT}
+  temperature: 0.1
+  max_output_tokens: 8000
+tools:
+  - repo.list_tree
+  - repo.read_file
+  - repo.search
+  - artifacts.read
+  - artifacts.write
+max_permission_level: 2
+limits:
+  max_turns: 15
+  max_tool_calls: 30
+  max_total_tokens: 200000
+  max_cost_usd: 3.0
+  timeout_seconds: 900
+quality_gates:
+  - key: every_requirement_sourced
+    description: Every requirement has at least one source reference (enforced by schema).
+  - key: must_requirements_covered
+    description: Every 'must' requirement has an acceptance criterion (enforced by schema).
+failure_handling:
+  max_retries: 2
+  retry_on: [model_error, schema_violation, timeout]
+  on_exhausted: escalate_to_supervisor

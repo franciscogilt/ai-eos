@@ -1,0 +1,134 @@
+# Authoritative tool catalog. A tool's permission level is defined here only.
+# executes_in:
+#   gateway      - runs in the tool-gateway worker (holds GitHub/AWS credentials)
+#   sandbox      - runs inside a disposable sandbox via the gateway (no credentials)
+#   orchestrator - workflow-internal action (signals, approvals, clarification)
+api_version: aieos/v1
+tools:
+  # ---------------- Level 1: read-only, automatic ----------------
+  - name: repo.list_tree
+    level: 1
+    description: List files at a ref of the connected repository snapshot.
+    executes_in: gateway
+    idempotent: true
+  - name: repo.read_file
+    level: 1
+    description: Read one file (size-capped) from the repository snapshot.
+    executes_in: gateway
+    idempotent: true
+  - name: repo.search
+    level: 1
+    description: Text/regex search over the repository snapshot.
+    executes_in: gateway
+    idempotent: true
+  - name: docs.fetch
+    level: 1
+    description: Fetch documentation from an allowlisted domain; returned as untrusted data.
+    executes_in: gateway
+    idempotent: true
+  - name: artifacts.read
+    level: 1
+    description: Read an artifact of the current workflow.
+    executes_in: gateway
+    idempotent: true
+  - name: workflow.ask_user
+    level: 1
+    description: Pause the workflow and send clarification questions to the requester.
+    executes_in: orchestrator
+    idempotent: true
+
+  # ---------------- Level 2: isolated execution, automatic under limits ----------------
+  - name: sandbox.write_file
+    level: 2
+    description: Create or modify a file in the task's sandbox workspace.
+    executes_in: sandbox
+    idempotent: true
+  - name: sandbox.run_command
+    level: 2
+    description: Run an allowlisted command in the sandbox (CPU/memory/time limited).
+    executes_in: sandbox
+    idempotent: false
+  - name: sandbox.run_tests
+    level: 2
+    description: Run the project's test command and store the report as an artifact.
+    executes_in: sandbox
+    idempotent: false
+  - name: sandbox.run_security_scan
+    level: 2
+    description: Run SAST, dependency and secret scanners on the sandbox workspace.
+    executes_in: sandbox
+    idempotent: false
+  - name: sandbox.export_patch
+    level: 2
+    description: Export the workspace diff against the base ref as a patch artifact.
+    executes_in: sandbox
+    idempotent: true
+  - name: artifacts.write
+    level: 2
+    description: Store a deliverable (spec, design, report) as a workflow artifact.
+    executes_in: gateway
+    idempotent: true
+
+  # ---------------- Level 3: controlled shared operations, policy approval ----------------
+  - name: github.push_branch
+    level: 3
+    description: Validate a patch artifact and push it to branch aieos/<workflow>/<task>.
+    executes_in: gateway
+    idempotent: true
+    approval_ttl_minutes: 1440
+  - name: github.create_pull_request
+    level: 3
+    description: Open a pull request from an aieos/* branch to the default branch.
+    executes_in: gateway
+    idempotent: true
+    approval_ttl_minutes: 1440
+  - name: github.comment
+    level: 3
+    description: Post a comment on a pull request opened by the platform.
+    executes_in: gateway
+    idempotent: true
+    approval_ttl_minutes: 1440
+  - name: github.merge_pull_request
+    level: 3
+    description: Merge a platform pull request, subject to branch protection.
+    executes_in: gateway
+    idempotent: true
+    approval_ttl_minutes: 1440
+  - name: staging.deploy
+    level: 3
+    description: Trigger the staging deployment workflow in GitHub Actions.
+    executes_in: gateway
+    idempotent: true
+    approval_ttl_minutes: 240
+
+  # ---------------- Level 4: sensitive, explicit human authorization ----------------
+  - name: production.deploy
+    level: 4
+    description: Trigger the production deployment workflow for an exact commit SHA.
+    executes_in: gateway
+    idempotent: true
+    approval_ttl_minutes: 60
+  - name: database.destructive_migration
+    level: 4
+    description: Apply a migration that drops or rewrites data.
+    executes_in: gateway
+    idempotent: false
+    approval_ttl_minutes: 60
+  - name: secrets.manage
+    level: 4
+    description: Create, rotate or delete a secret reference.
+    executes_in: gateway
+    idempotent: false
+    approval_ttl_minutes: 30
+  - name: iam.modify
+    level: 4
+    description: Change IAM roles or policies.
+    executes_in: gateway
+    idempotent: false
+    approval_ttl_minutes: 30
+  - name: policy.exception
+    level: 4
+    description: Waive a blocking quality gate or security finding.
+    executes_in: orchestrator
+    idempotent: true
+    approval_ttl_minutes: 240

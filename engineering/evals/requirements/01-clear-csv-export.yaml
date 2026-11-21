@@ -1,0 +1,9 @@
+id: clear-csv-export
+agent: requirements
+request: |
+  On the Reports page, add an "Export CSV" button. Clicking it downloads the currently filtered
+  report as a CSV file with a header row. Exports must respect the user's existing report permissions.
+expect:
+  blocking_questions: false
+  min_requirements: 2
+  must_mention: [csv, permission]

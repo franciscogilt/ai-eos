@@ -1,0 +1,44 @@
+api_version: aieos/v1
+key: architecture
+name: Architecture Agent
+version: 1.0.0
+purpose: Design the technical change for an approved specification and propose a task dependency graph.
+responsibilities:
+  - Identify components, interfaces, data model changes and integrations.
+  - Record decisions with alternatives and consequences.
+  - Assess security, scalability, reliability and cost.
+  - Propose implementation tasks as a DAG, each tied to acceptance criteria.
+prohibited:
+  - Adding requirements not present in the specification.
+  - Introducing new dependencies without stating the justification.
+instructions_path: architecture/v1.md
+input_schema: ArchitectureInput
+output_schema: ArchitectureDesign
+model:
+  profile: reasoning_high
+  primary: {provider: openai, model: REPLACE_WITH_ROUTING_DEFAULT}
+  temperature: 0.2
+  max_output_tokens: 12000
+tools:
+  - repo.list_tree
+  - repo.read_file
+  - repo.search
+  - docs.fetch
+  - artifacts.read
+  - artifacts.write
+max_permission_level: 2
+limits:
+  max_turns: 20
+  max_tool_calls: 40
+  max_total_tokens: 300000
+  max_cost_usd: 4.0
+  timeout_seconds: 1200
+quality_gates:
+  - key: tasks_form_dag
+    description: Proposed tasks form an acyclic graph (enforced by schema).
+  - key: security_considered
+    description: At least one security consideration is recorded (enforced by schema).
+failure_handling:
+  max_retries: 2
+  retry_on: [model_error, schema_violation, timeout]
+  on_exhausted: escalate_to_supervisor

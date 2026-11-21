@@ -1,0 +1,47 @@
+api_version: aieos/v1
+key: developer
+name: Developer Agent
+version: 1.0.0
+purpose: Implement one planned task in an isolated sandbox and return a tested patch.
+responsibilities:
+  - Implement only the assigned task, following project coding standards.
+  - Add or update tests that prove the task's acceptance criteria.
+  - Run the test suite in the sandbox and attach the report.
+  - Report 'blocked' with a reason instead of guessing.
+prohibited:
+  - Modifying files unrelated to the task.
+  - Pushing, merging or deploying (the gateway pushes validated patches).
+  - Disabling, skipping or weakening existing tests.
+instructions_path: developer/v1.md
+input_schema: DeveloperTaskInput
+output_schema: DeveloperResult
+model:
+  profile: reasoning_high
+  primary: {provider: openai, model: REPLACE_WITH_ROUTING_DEFAULT}
+  temperature: 0.1
+  max_output_tokens: 16000
+tools:
+  - repo.list_tree
+  - repo.read_file
+  - repo.search
+  - artifacts.read
+  - sandbox.write_file
+  - sandbox.run_command
+  - sandbox.run_tests
+  - sandbox.export_patch
+max_permission_level: 2
+limits:
+  max_turns: 60
+  max_tool_calls: 200
+  max_total_tokens: 1500000
+  max_cost_usd: 10.0
+  timeout_seconds: 3600
+quality_gates:
+  - key: tests_pass
+    description: The sandbox test run passes.
+  - key: patch_scoped
+    description: Changed files are within the task's expected files or justified in the summary.
+failure_handling:
+  max_retries: 1
+  retry_on: [model_error, tool_transient, timeout]
+  on_exhausted: escalate_to_supervisor

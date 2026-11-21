@@ -1,0 +1,117 @@
+[project]
+name = "aieos"
+version = "0.1.0"
+description = "AI-driven software engineering framework and autonomous development platform"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+# Milestone 1 runtime dependencies only. Each later dependency is added with its
+# increment and a one-line justification in docs/dependencies.md.
+dependencies = [
+    "pydantic>=2.9,<3",          # contracts and I/O schemas
+    "pyyaml>=6.0,<7",            # agent definitions and tool catalog
+    "alembic>=1.14,<2",          # migrations (wraps the reviewed SQL files)
+    "sqlalchemy[asyncio]>=2.0.36,<3",  # required by alembic; async engine for the API (needs greenlet)
+    "psycopg[binary]>=3.2,<4",   # PostgreSQL driver (sync for admin/migrations, async for the API)
+    # Increment 1
+    "fastapi>=0.115,<1",                        # HTTP API
+    "uvicorn>=0.32,<1",                         # ASGI server
+    "pydantic-settings>=2.6,<3",                # environment configuration
+    "pyjwt[crypto]>=2.10,<3",                   # OIDC JWT verification + JWKS client
+    "structlog>=24.4",                          # structured logs with a redaction processor
+    "opentelemetry-sdk>=1.28,<2",               # tracing
+    "opentelemetry-exporter-otlp-proto-http>=1.28,<2",  # OTLP export to the collector
+    # Increment 2
+    "boto3>=1.35,<2",                           # S3 artifact store
+    "openai-agents>=0.25,<0.26",                # agent runtime (decided); pinned minor: pre-1.0 API
+    # Increment 3
+    "temporalio>=1.36,<2",                      # durable workflows (decided)
+]
+
+[project.scripts]
+aieos-api = "aieos.api.server:main"
+aieos-admin = "aieos.cli.admin:main"
+aieos-worker = "aieos.worker.main:main"
+aieos = "aieos.cli.main:main"
+aieos-eval = "aieos.evals.harness:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "types-PyYAML>=6.0",
+    "import-linter>=2.1",
+    "pip-audit>=2.7",
+    "httpx>=0.27",  # FastAPI TestClient
+    "moto[s3]>=5.0",  # in-process S3 for artifact tests
+    "boto3-stubs[s3]>=1.35",
+    "pytest-asyncio>=0.24",  # Temporal workflow tests
+]
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aieos"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = ["temporal: needs the Temporal test server (downloaded by the SDK on first use)"]
+asyncio_default_fixture_loop_scope = "function"
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "BLE", "SIM", "RUF"]
+ignore = ["S101"]  # asserts are fine in tests
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106", "S108", "S608"]
+# f-strings there interpolate module-level column-list constants only; every value is a bound parameter.
+"src/aieos/persistence/repositories.py" = ["S608"]
+"src/aieos/api/routes/approvals.py" = ["S608"]
+"src/aieos/api/routes/workflows.py" = ["S608"]
+"src/aieos/cli/admin.py" = ["S101", "T201"]
+"src/aieos/cli/main.py" = ["T201"]
+"src/aieos/evals/harness.py" = ["T201"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+mypy_path = "src"
+packages = ["aieos"]
+
+# Module boundaries of the modular monolith. Lower layers never import higher ones.
+[tool.importlinter]
+root_package = "aieos"
+
+[[tool.importlinter.contracts]]
+name = "Layered architecture"
+type = "layers"
+layers = [
+    "aieos.api | aieos.worker | aieos.cli | aieos.evals",
+    "aieos.orchestration",
+    "aieos.agents",
+    "aieos.gateway",
+    "aieos.sandbox | aieos.providers | aieos.integrations | aieos.artifacts",
+    "aieos.persistence | aieos.observability",
+    "aieos.contracts",
+    "aieos.core",
+]
+containers = []
+ignore_imports = []
+exhaustive = false
+
+[[tool.importlinter.contracts]]
+name = "Agents never reach credentials-bearing integrations directly"
+type = "forbidden"
+source_modules = ["aieos.agents", "aieos.orchestration"]
+forbidden_modules = ["aieos.integrations"]

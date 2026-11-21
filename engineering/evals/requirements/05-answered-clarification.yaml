@@ -1,0 +1,9 @@
+id: answered-clarification
+agent: requirements
+request: |
+  Send users a notification when their export is ready.
+clarifications:
+  Q-1: "Email only, to the address on the user's account. No in-app notifications."
+expect:
+  blocking_questions: false
+  must_mention: [email]
