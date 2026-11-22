@@ -134,6 +134,13 @@ class TemporalRuntime:
 
     async def cleanup(self, org_id: UUID, workflow_id: UUID) -> None:
         await workflow.execute_activity(
+            "cleanup_sandboxes",
+            args=[org_id, workflow_id],
+            task_queue=GATEWAY_QUEUE,
+            start_to_close_timeout=timedelta(minutes=2),
+            retry_policy=_QUICK,
+        )
+        await workflow.execute_activity(
             "cleanup_workflow",
             args=[org_id, workflow_id],
             task_queue=AGENT_QUEUE,

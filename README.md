@@ -39,6 +39,7 @@ budget can never be bypassed. Then set `OPENAI_API_KEY` and the second provider'
 | `engineering/model-routing.yaml` | Providers, model ids per profile, prices, circuit-breaker settings |
 | `src/aieos/artifacts/` | S3 artifact store (content-addressed, integrity-checked, presigned URLs) |
 | `src/aieos/providers/` | ModelRouter, metered model wrapper, circuit breaker, budget enforcement |
+| `src/aieos/sandbox/` | Disposable Docker sandboxes for agent-generated code (no network, read-only root, limits) |
 | `migrations/sql/` | Reviewed SQL migrations; `migrations/versions/` wraps them for Alembic |
 | `infrastructure/` | Docker, AWS and GitHub Actions assets |
 | `docs/` | Blueprint and architecture decision records |

@@ -113,6 +113,7 @@ def test_happy_path_with_merge_approval():
     outcome = asyncio.run(process.run())
 
     assert outcome.status == "succeeded" and outcome.pull_request == {"number": 7}
+    assert rt.cleaned  # sandboxes and runs are released on success too
     assert rt.statuses() == ["running", "awaiting_approval", "running", "succeeded"]
     assert [s.step_key for s in rt.steps] == [
         "requirements",

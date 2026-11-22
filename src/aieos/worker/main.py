@@ -17,10 +17,17 @@ from temporalio.worker import Worker
 from aieos.agents.runner import SdkAgentRunner
 from aieos.artifacts.store import ArtifactStore
 from aieos.core.logging import configure_logging, get_logger
-from aieos.core.settings import ModelRoutingSettings, Settings, StorageSettings, TemporalSettings
+from aieos.core.settings import (
+    ModelRoutingSettings,
+    SandboxSettings,
+    Settings,
+    StorageSettings,
+    TemporalSettings,
+)
 from aieos.gateway.activities import GatewayActivities
 from aieos.gateway.catalog import load_catalog
 from aieos.gateway.handlers import artifact_handlers
+from aieos.gateway.sandbox_handlers import sandbox_handlers
 from aieos.gateway.service import ToolGateway
 from aieos.orchestration.activities import OrchestrationActivities
 from aieos.orchestration.client import connect
@@ -30,6 +37,7 @@ from aieos.persistence.db import Database
 from aieos.providers.config import load_routing_config
 from aieos.providers.metering import PostgresUsageRecorder
 from aieos.providers.router import ModelRouter
+from aieos.sandbox.docker import DockerCLI, DockerSandboxManager, SandboxLimits
 
 log = get_logger("aieos.worker")
 
@@ -61,8 +69,24 @@ async def _run(kind: str, engineering: Path) -> None:
         )
     else:
         store = ArtifactStore.from_settings(db, StorageSettings())
-        gateway = ToolGateway(db, load_catalog(engineering / "tool-catalog.yaml"), artifact_handlers(store))
-        worker = Worker(client, task_queue=GATEWAY_QUEUE, activities=[GatewayActivities(gateway).execute_tool])
+        handlers = artifact_handlers(store)
+        sandbox_settings = SandboxSettings()
+        sandboxes = None
+        if sandbox_settings.sandbox_backend == "docker":
+            sandboxes = DockerSandboxManager(
+                DockerCLI(),
+                image=sandbox_settings.sandbox_image,
+                runtime=sandbox_settings.sandbox_runtime,
+                limits=SandboxLimits(
+                    cpus=sandbox_settings.sandbox_default_cpus,
+                    memory_mb=sandbox_settings.sandbox_default_memory_mb,
+                    command_timeout_seconds=sandbox_settings.sandbox_default_timeout_seconds,
+                ),
+            )
+            await sandboxes.reap(older_than_seconds=sandbox_settings.sandbox_max_age_seconds)
+            handlers |= sandbox_handlers(sandboxes, store)
+        gateway = ToolGateway(db, load_catalog(engineering / "tool-catalog.yaml"), handlers)
+        worker = Worker(client, task_queue=GATEWAY_QUEUE, activities=GatewayActivities(gateway, sandboxes).all())
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
