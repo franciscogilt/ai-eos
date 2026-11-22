@@ -59,7 +59,10 @@ packages = ["src/aieos"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
-markers = ["temporal: needs the Temporal test server (downloaded by the SDK on first use)"]
+markers = [
+    "temporal: needs the Temporal test server (downloaded by the SDK on first use)",
+    "docker: needs a Docker daemon and the sandbox image",
+]
 asyncio_default_fixture_loop_scope = "function"
 pythonpath = ["src"]
 
@@ -73,7 +76,7 @@ select = ["E", "F", "W", "I", "B", "UP", "S", "BLE", "SIM", "RUF"]
 ignore = ["S101"]  # asserts are fine in tests
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S105", "S106", "S108", "S608"]
+"tests/**" = ["S105", "S106", "S108", "S603", "S607", "S608"]
 # f-strings there interpolate module-level column-list constants only; every value is a bound parameter.
 "src/aieos/persistence/repositories.py" = ["S608"]
 "src/aieos/api/routes/approvals.py" = ["S608"]

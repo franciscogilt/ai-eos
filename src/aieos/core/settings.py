@@ -97,3 +97,17 @@ class TemporalSettings(BaseSettings):
     temporal_namespace: str = "aieos-local"
     temporal_api_key: SecretStr | None = None
     temporal_tls: bool = False
+
+
+class SandboxSettings(BaseSettings):
+    """Code-execution sandboxes. `docker` is for local development and CI; AWS uses Fargate (later)."""
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", frozen=True)
+
+    sandbox_backend: Literal["disabled", "docker"] = "disabled"
+    sandbox_image: str = "aieos-sandbox:local"
+    sandbox_runtime: str | None = None  # e.g. "runsc" for gVisor, where installed
+    sandbox_default_cpus: float = Field(default=2.0, gt=0, le=16)
+    sandbox_default_memory_mb: int = Field(default=2048, ge=256, le=32768)
+    sandbox_default_timeout_seconds: int = Field(default=900, ge=10, le=3600)
+    sandbox_max_age_seconds: int = Field(default=6 * 3600, ge=600)

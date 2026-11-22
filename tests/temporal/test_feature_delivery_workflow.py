@@ -47,6 +47,7 @@ class Fakes:
         self.tool_calls: list[ToolRequest] = []
         self.approval_db = "pending"
         self.cleaned = False
+        self.sandboxes_cleaned = False
 
     @activity.defn(name="record_progress")
     async def record_progress(self, envelope: ProgressEnvelope) -> None:
@@ -81,6 +82,14 @@ class Fakes:
         if request.tool_name == "github.merge_pull_request" and len(merges) == 1:
             return ToolResult(status="awaiting_approval", reason="human approval required", approval_id=APPROVAL_ID)
         return ToolResult(status="succeeded", reason="ok", result={"number": 42})
+
+    @activity.defn(name="cleanup_sandboxes")
+    async def cleanup_sandboxes(self, org_id: uuid.UUID, workflow_id: uuid.UUID) -> int:
+        self.sandboxes_cleaned = True
+        return 0
+
+    def gateway_activities(self) -> list[Any]:
+        return [self.execute_tool, self.cleanup_sandboxes]
 
     def agent_activities(self) -> list[Any]:
         return [
@@ -135,7 +144,7 @@ def workers(env: WorkflowEnvironment, fakes: Fakes) -> tuple[Worker, Worker]:
     agent = Worker(
         env.client, task_queue=AGENT_QUEUE, workflows=[FeatureDeliveryWorkflow], activities=fakes.agent_activities()
     )
-    gateway = Worker(env.client, task_queue=GATEWAY_QUEUE, activities=[fakes.execute_tool])
+    gateway = Worker(env.client, task_queue=GATEWAY_QUEUE, activities=fakes.gateway_activities())
     return agent, gateway
 
 
@@ -182,7 +191,7 @@ async def test_resumes_after_worker_restart(env: WorkflowEnvironment) -> None:
     deterministic under replay at every step.
     """
     fakes = Fakes()
-    gateway = Worker(env.client, task_queue=GATEWAY_QUEUE, activities=[fakes.execute_tool])
+    gateway = Worker(env.client, task_queue=GATEWAY_QUEUE, activities=fakes.gateway_activities())
 
     def agent_worker() -> Worker:
         return Worker(
@@ -239,7 +248,7 @@ async def test_cancel_signal_cleans_up(env: WorkflowEnvironment) -> None:
         await wait_for_phase(handle, "awaiting_approval")
         await handle.signal(FeatureDeliveryWorkflow.cancel_requested, "no longer needed")
         outcome = await handle.result()
-    assert outcome.status == "cancelled" and fakes.cleaned
+    assert outcome.status == "cancelled" and fakes.cleaned and fakes.sandboxes_cleaned
     assert fakes.events[-1].kind == "workflow_status" and fakes.events[-1].status == "cancelled"
 
 
@@ -269,7 +278,7 @@ async def test_tool_bridge_runs_each_call_once(env: WorkflowEnvironment) -> None
 
     fakes = Fakes()
     agent = Worker(env.client, task_queue=AGENT_QUEUE, workflows=[ToolCallWorkflow])
-    gateway = Worker(env.client, task_queue=GATEWAY_QUEUE, activities=[fakes.execute_tool])
+    gateway = Worker(env.client, task_queue=GATEWAY_QUEUE, activities=fakes.gateway_activities())
     request = ToolRequest(
         org_id=uuid.uuid4(),
         workflow_id=uuid.uuid4(),

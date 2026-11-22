@@ -142,6 +142,7 @@ class DeliveryProcess:
                 "github.merge_pull_request",
                 {"repository_id": str(self._in.repository_id), "pull_request": (pr.result or {}).get("number")},
             )
+            await self._rt.cleanup(org, wf)
             await self._workflow_status("succeeded")
             return DeliveryOutcome(status="succeeded", reason="merged", pull_request=pr.result)
         except CancelledByUserError:
