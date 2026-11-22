@@ -172,7 +172,7 @@ class DockerSandboxManager:
             "none",
             "--read-only",
             "--tmpfs",
-            f"{WORKSPACE}:rw,exec,nosuid,nodev,size={lim.workspace_mb}m,mode=1777",
+            f"{WORKSPACE}:rw,exec,nosuid,nodev,size={lim.workspace_mb}m,uid=65534,gid=65534,mode=0700",
             "--tmpfs",
             f"/tmp:rw,noexec,nosuid,nodev,size={lim.tmp_mb}m,mode=1777",  # noqa: S108 - container path
             "--user",

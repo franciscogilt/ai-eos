@@ -62,6 +62,9 @@ def test_run_args_enforce_isolation():
     assert ("--security-opt", "no-new-privileges") in pairs and ("--user", "65534:65534") in pairs
     assert ("--memory", "512m") in pairs and ("--memory-swap", "512m") in pairs  # no swap escape
     assert ("--pids-limit", "64") in pairs and ("--cpus", "1.5") in pairs
+    workspace = args[args.index("--tmpfs") + 1]
+    # Owned by the sandbox user, private, so git's ownership check passes without disabling it.
+    assert workspace.startswith("/workspace:") and "uid=65534,gid=65534,mode=0700" in workspace
     assert ("--label", f"aieos.workflow_id={k.workflow_id}") in pairs
     for forbidden in ("--privileged", "-v", "--volume", "--mount", "--network=host", "--pid", "--ipc"):
         assert forbidden not in args
