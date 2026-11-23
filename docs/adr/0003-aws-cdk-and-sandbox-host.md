@@ -1,4 +1,4 @@
-# ADR-0003: AWS infrastructure as CDK (Python); sandboxes on a dedicated EC2 host
+# ADR-0003: AWS infrastructure as CDK (Python); where sandboxes run
 
 - Status: accepted (code only; nothing deployed)
 - Date: 2026-11-23
@@ -41,3 +41,31 @@ and a Fargate-native sandbox backend does not exist yet.
 - **No live deploy yet.** Nothing has been deployed. Tests synthesize the template and check its
   security properties; a real deploy needs an AWS account, an authorization decision by the owner and the
   values in `cdk.json`.
+
+## Update (2026-11-23): sandboxes on Fargate; the EC2 sandbox host is removed
+- **One Fargate task per sandbox.** Each sandbox is its own ECS Fargate task (`sandbox/fargate.py`), a
+  separate micro-VM. Agent code never shares a kernel with the gateway or with another sandbox.
+- **Executor.** Commands go through an in-sandbox executor (`sandbox/executor.py`):
+  - it runs as root and executes every command as uid 65534, so sandboxed code cannot kill or replace
+    it, or forge its results;
+  - every request must carry a per-sandbox token (HMAC of the sandbox name under a gateway secret).
+- **The sandbox task:**
+  - no task role, so no AWS credentials;
+  - read-only root filesystem;
+  - task-local `/workspace` and `/tmp`.
+- **Sandbox network:**
+  - isolated subnets with no route out of the VPC;
+  - a security group that admits only the gateway on 7070;
+  - egress only to the ECR endpoints, and to S3 through an endpoint whose policy allows only ECR's
+    layer bucket, so no exfiltration to other buckets.
+- **Gateway:**
+  - runs on Fargate with no Docker socket;
+  - may start only the sandbox task definition, in this cluster.
+- The EC2 sandbox host and the gateway image target are removed. The Docker backend stays for local
+  development and CI. Both backends share one implementation of the workspace operations
+  (`sandbox/base.py`).
+- **Trade-offs:**
+  - a sandbox takes roughly a minute to start (Fargate provisioning);
+  - Fargate has no per-task process limit, so the executor sets `RLIMIT_NPROC` for the sandbox user;
+  - executor traffic inside the VPC is plain HTTP with a bearer token. TLS between gateway and sandbox
+    is a possible follow-up.

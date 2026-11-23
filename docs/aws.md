@@ -11,19 +11,21 @@ run, after deciding to.
   - Backups are kept 7 days in staging and 30 days in production; production also has deletion
     protection and Multi-AZ.
   - An S3 artifact bucket: private, TLS only, versioned, KMS.
-- **ECR repositories:** platform, gateway and sandbox images, with immutable tags and scan on push.
+- **ECR repositories:** platform and sandbox images, with immutable tags and scan on push.
 - **ECS:**
   - API on Fargate behind an ALB (HTTPS with a certificate);
   - agent worker on Fargate;
-  - tool gateway on a dedicated EC2 sandbox host;
+  - tool gateway on Fargate;
+  - one Fargate task per code sandbox, in isolated subnets with no internet route and no AWS
+    credentials;
   - a one-off admin task.
 - **Secrets Manager:**
   - generated: RDS master, owner and runtime DB passwords;
   - placeholders you fill in: GitHub App key, Temporal Cloud API key, model API keys.
 - **GitHub OIDC deploy role:** only this repository's `<env>` GitHub environment can use it.
 
-These resources cost money while they exist, even when idle: NAT gateway, RDS, ALB and the EC2 sandbox
-host. Check current AWS prices for your region before deploying.
+These resources cost money while they exist, even when idle: NAT gateway, RDS, ALB and the ECR interface
+endpoints. Sandbox tasks cost only while they run. Check current AWS prices for your region before deploying.
 
 ## First deploy (by hand, with admin credentials)
 1. Fill `infrastructure/aws/cdk.json` → `aieos:staging`:
@@ -47,13 +49,12 @@ host. Check current AWS prices for your region before deploying.
 
 ## Every deploy after that
 Actions → **deploy** → choose the environment. On the first run, tick `bootstrap_db`. The workflow:
-1. builds and pushes the three images, tagged with the commit SHA;
+1. builds and pushes the two images (platform and sandbox), tagged with the commit SHA;
 2. runs `cdk deploy` with that tag;
 3. runs the admin task: `bootstrap-db` (first time only), `alembic upgrade head`, then `publish-agents`.
 
 ## Not covered yet
-- **Sandbox isolation.** The gateway uses the sandbox host's Docker socket (see ADR-0003); a
-  Fargate/Firecracker sandbox backend is the follow-up.
+- **Sandbox start time.** A sandbox takes about a minute to start on Fargate.
 - **Observability.** CloudWatch Logs and Container Insights only. Setting an OTLP endpoint for traces is
   left to you.
 - **Testing.** `bootstrap-db` is exercised only by its argument checks in tests. Run it against a staging

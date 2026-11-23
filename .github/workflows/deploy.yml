@@ -54,15 +54,14 @@ jobs:
           stack="aieos-${ENVIRONMENT}"
           get() { aws cloudformation describe-stacks --stack-name "$stack" \
                     --query "Stacks[0].Outputs[?OutputKey=='$1Output'].OutputValue" --output text; }
-          for k in PlatformRepo GatewayRepo SandboxRepo ClusterName AdminTaskDefinition AdminSecurityGroup PrivateSubnets; do
+          for k in PlatformRepo SandboxRepo ClusterName AdminTaskDefinition AdminSecurityGroup PrivateSubnets; do
             echo "$k=$(get $k)" >> "$GITHUB_OUTPUT"
           done
-      - name: Build and push images (tags are immutable)
+      - name: Build and push the platform and sandbox images (tags are immutable)
         run: |
           docker build -f infrastructure/docker/api.Dockerfile -t "${{ steps.out.outputs.PlatformRepo }}:$IMAGE_TAG" .
-          docker build -f infrastructure/docker/api.Dockerfile --target gateway -t "${{ steps.out.outputs.GatewayRepo }}:$IMAGE_TAG" .
           docker build -f infrastructure/docker/sandbox.Dockerfile -t "${{ steps.out.outputs.SandboxRepo }}:$IMAGE_TAG" .
-          for repo in "${{ steps.out.outputs.PlatformRepo }}" "${{ steps.out.outputs.GatewayRepo }}" "${{ steps.out.outputs.SandboxRepo }}"; do
+          for repo in "${{ steps.out.outputs.PlatformRepo }}" "${{ steps.out.outputs.SandboxRepo }}"; do
             docker push "$repo:$IMAGE_TAG"
           done
       - name: Deploy the stack with the new images

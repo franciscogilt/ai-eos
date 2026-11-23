@@ -118,11 +118,19 @@ class TemporalSettings(BaseSettings):
 
 
 class SandboxSettings(BaseSettings):
-    """Code-execution sandboxes. `docker` is for local development and CI; AWS uses Fargate (later)."""
+    """Code-execution sandboxes. `docker` for local development and CI; `fargate` on AWS (one ECS task per
+    sandbox, see sandbox/fargate.py)."""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", frozen=True)
 
-    sandbox_backend: Literal["disabled", "docker"] = "disabled"
+    sandbox_backend: Literal["disabled", "docker", "fargate"] = "disabled"
+    # fargate only
+    sandbox_ecs_cluster: str | None = None
+    sandbox_task_definition: str | None = None
+    sandbox_subnets: str = ""  # comma-separated
+    sandbox_security_groups: str = ""  # comma-separated
+    sandbox_token_secret_arn: str | None = None  # Secrets Manager; or SANDBOX_TOKEN_SECRET locally
+    sandbox_token_secret: SecretStr | None = None
     sandbox_image: str = "aieos-sandbox:local"
     sandbox_runtime: str | None = None  # e.g. "runsc" for gVisor, where installed
     sandbox_default_cpus: float = Field(default=2.0, gt=0, le=16)
@@ -157,3 +165,15 @@ class GitHubSettings(BaseSettings):
             return str(value["SecretString"])
         assert self.github_app_private_key_path is not None
         return self.github_app_private_key_path.read_text(encoding="utf-8")
+
+
+def sandbox_token_secret(settings: SandboxSettings) -> bytes:
+    """The gateway's key for per-sandbox executor tokens (Fargate backend)."""
+    if settings.sandbox_token_secret_arn:
+        import boto3
+
+        value = boto3.client("secretsmanager").get_secret_value(SecretId=settings.sandbox_token_secret_arn)
+        return str(value["SecretString"]).encode()
+    if settings.sandbox_token_secret is not None:
+        return settings.sandbox_token_secret.get_secret_value().encode()
+    raise ValueError("SANDBOX_TOKEN_SECRET_ARN (or SANDBOX_TOKEN_SECRET) is required for the fargate backend")

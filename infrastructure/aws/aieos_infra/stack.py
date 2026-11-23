@@ -27,7 +27,6 @@ from aws_cdk import (
     RemovalPolicy,
     Stack,
 )
-from aws_cdk import aws_autoscaling as autoscaling
 from aws_cdk import aws_certificatemanager as acm
 from aws_cdk import aws_ec2 as ec2
 from aws_cdk import aws_ecr as ecr
@@ -75,9 +74,26 @@ class AieosStack(Stack):
                 ec2.SubnetConfiguration(name="public", subnet_type=ec2.SubnetType.PUBLIC, cidr_mask=24),
                 ec2.SubnetConfiguration(name="private", subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS, cidr_mask=22),
                 ec2.SubnetConfiguration(name="data", subnet_type=ec2.SubnetType.PRIVATE_ISOLATED, cidr_mask=24),
+                # Code sandboxes: no route out of the VPC at all.
+                ec2.SubnetConfiguration(name="sandbox", subnet_type=ec2.SubnetType.PRIVATE_ISOLATED, cidr_mask=22),
             ],
         )
-        self.vpc.add_gateway_endpoint("S3Endpoint", service=ec2.GatewayVpcEndpointAwsService.S3)
+        sandbox_subnets = ec2.SubnetSelection(subnet_group_name="sandbox")
+        self.vpc.add_gateway_endpoint(
+            "S3Endpoint",
+            service=ec2.GatewayVpcEndpointAwsService.S3,
+            subnets=[ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS)],
+        )
+        # Sandboxes reach S3 only to pull image layers from ECR's bucket (no other bucket, so no exfiltration).
+        self.vpc.add_gateway_endpoint(
+            "SandboxS3Endpoint", service=ec2.GatewayVpcEndpointAwsService.S3, subnets=[sandbox_subnets]
+        ).add_to_policy(
+            iam.PolicyStatement(
+                principals=[iam.AnyPrincipal()],
+                actions=["s3:GetObject"],
+                resources=[f"arn:aws:s3:::prod-{self.region}-starport-layer-bucket/*"],
+            )
+        )
         self.vpc.add_flow_log("FlowLog", traffic_type=ec2.FlowLogTrafficType.REJECT)
 
         # ------------------------------------------------------------------ encryption and storage
@@ -173,10 +189,8 @@ class AieosStack(Stack):
             )
 
         self.platform_repo = repository("PlatformRepo")
-        self.gateway_repo = repository("GatewayRepo")
         self.sandbox_repo = repository("SandboxRepo")
         platform_image = ecs.ContainerImage.from_ecr_repository(self.platform_repo, image_tag)
-        gateway_image = ecs.ContainerImage.from_ecr_repository(self.gateway_repo, image_tag)
 
         self.cluster = ecs.Cluster(self, "Cluster", vpc=self.vpc, container_insights_v2=ecs.ContainerInsights.ENABLED)
         self.log_group = logs.LogGroup(
@@ -269,74 +283,129 @@ class AieosStack(Stack):
         )
         self._db_access(self.agents.connections)
 
-        # ------------------------------------------------------------------ gateway worker on the sandbox host
-        host_sg = ec2.SecurityGroup(self, "SandboxHostSg", vpc=self.vpc, description="Sandbox host: no inbound")
-        launch_template = ec2.LaunchTemplate(
-            self,
-            "SandboxHostTemplate",
-            instance_type=ec2.InstanceType(cfg.sandbox_host_instance_type),
-            machine_image=ecs.EcsOptimizedImage.amazon_linux2023(),
-            security_group=host_sg,
-            role=iam.Role(self, "SandboxHostRole", assumed_by=iam.ServicePrincipal("ec2.amazonaws.com")),
-            require_imdsv2=True,
-            http_put_response_hop_limit=1,  # containers cannot reach the instance credentials
-            block_devices=[
-                ec2.BlockDevice(
-                    device_name="/dev/xvda",
-                    volume=ec2.BlockDeviceVolume.ebs(60, encrypted=True, volume_type=ec2.EbsDeviceVolumeType.GP3),
-                )
-            ],
-            user_data=ec2.UserData.for_linux(),
+        # ------------------------------------------------------------------ code sandboxes (one Fargate task each)
+        self.sandbox_sg = ec2.SecurityGroup(
+            self, "SandboxSg", vpc=self.vpc, allow_all_outbound=False, description="Code sandbox: no internet"
         )
-        asg = autoscaling.AutoScalingGroup(
+        endpoint_sg = ec2.SecurityGroup(
             self,
-            "SandboxHosts",
+            "SandboxEndpointSg",
             vpc=self.vpc,
-            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
-            launch_template=launch_template,
-            min_capacity=cfg.sandbox_host_count,
-            max_capacity=cfg.sandbox_host_count,
+            allow_all_outbound=False,
+            description="ECR endpoints for sandbox image pulls",
         )
-        capacity = ecs.AsgCapacityProvider(self, "SandboxCapacity", auto_scaling_group=asg)
-        self.cluster.add_asg_capacity_provider(capacity)
+        endpoint_sg.add_ingress_rule(self.sandbox_sg, ec2.Port.tcp(443), "sandbox image pulls")
+        for name, service in (
+            ("EcrApiEndpoint", ec2.InterfaceVpcEndpointAwsService.ECR),
+            ("EcrDkrEndpoint", ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER),
+        ):
+            self.vpc.add_interface_endpoint(
+                name, service=service, subnets=sandbox_subnets, security_groups=[endpoint_sg], private_dns_enabled=True
+            )
+        self.sandbox_sg.add_egress_rule(endpoint_sg, ec2.Port.tcp(443), "ECR endpoints")
+        # S3 (image layers) through the restricted gateway endpoint above.
+        self.sandbox_sg.add_egress_rule(
+            ec2.Peer.prefix_list(_s3_prefix_list(self)), ec2.Port.tcp(443), "S3 gateway endpoint (ECR layers)"
+        )
 
-        gateway_td = ecs.Ec2TaskDefinition(self, "GatewayTask", network_mode=ecs.NetworkMode.AWS_VPC)
-        gateway_td.add_volume(name="docker-socket", host=ecs.Host(source_path="/var/run/docker.sock"))
-        gateway = gateway_td.add_container(
+        self.sandbox_td = ecs.FargateTaskDefinition(
+            self,
+            "SandboxTask",
+            family=f"aieos-{cfg.name}-sandbox",
+            cpu=1024,
+            memory_limit_mib=2048,
+            ephemeral_storage_gib=21,
+        )
+        self.sandbox_td.add_volume(name="workspace")
+        self.sandbox_td.add_volume(name="tmp")
+        sandbox = self.sandbox_td.add_container(
+            "sandbox",
+            image=ecs.ContainerImage.from_ecr_repository(self.sandbox_repo, image_tag),
+            entry_point=["python3", "/opt/aieos/executor.py"],
+            user="0",  # the executor drops every command to uid 65534
+            readonly_root_filesystem=True,
+            port_mappings=[ecs.PortMapping(container_port=7070)],
+            environment={"AIEOS_WORKSPACE": "/workspace", "AIEOS_EXECUTOR_PORT": "7070"},
+            linux_parameters=ecs.LinuxParameters(self, "SandboxLinux", init_process_enabled=True),
+        )
+        sandbox.add_mount_points(
+            ecs.MountPoint(source_volume="workspace", container_path="/workspace", read_only=False),
+            ecs.MountPoint(source_volume="tmp", container_path="/tmp", read_only=False),  # noqa: S108
+        )
+        # No task role at all: code in a sandbox gets no AWS credentials.
+        self.sandbox_td.node.default_child.add_property_deletion_override("TaskRoleArn")  # type: ignore[union-attr]
+        self.sandbox_repo.grant_pull(self.sandbox_td.obtain_execution_role())
+        self.sandbox_token = generated("SandboxTokenKey", "Gateway key for per-sandbox executor tokens")
+
+        # ------------------------------------------------------------------ gateway worker (Fargate, no inbound)
+        gateway_td = ecs.FargateTaskDefinition(self, "GatewayTask", cpu=512, memory_limit_mib=1024)
+        gateway_td.add_container(
             "gateway",
-            image=gateway_image,
-            memory_reservation_mib=512,
+            image=platform_image,
+            entry_point=["aieos-worker"],
             command=["gateway"],
             environment={
                 **common_env,
                 "OTEL_SERVICE_NAME": "aieos-gateway",
-                "SANDBOX_BACKEND": "docker",
-                "SANDBOX_IMAGE": self.sandbox_repo.repository_uri_for_tag(image_tag),
+                "SANDBOX_BACKEND": "fargate",
+                "SANDBOX_ECS_CLUSTER": self.cluster.cluster_name,
+                "SANDBOX_TASK_DEFINITION": self.sandbox_td.task_definition_arn,
+                "SANDBOX_SUBNETS": ",".join(
+                    sn.subnet_id for sn in self.vpc.select_subnets(subnet_group_name="sandbox").subnets
+                ),
+                "SANDBOX_SECURITY_GROUPS": self.sandbox_sg.security_group_id,
+                "SANDBOX_TOKEN_SECRET_ARN": self.sandbox_token.secret_arn,
+                # Valid Fargate size: 1 vCPU with 2 GB.
+                "SANDBOX_DEFAULT_CPUS": "1",
+                "SANDBOX_DEFAULT_MEMORY_MB": "2048",
                 "GITHUB_APP_PRIVATE_KEY_SECRET_ARN": self.github_key.secret_arn,
                 **({"GITHUB_APP_ID": cfg.github_app_id} if cfg.github_app_id else {}),
             },
             secrets=runtime_secrets,
             logging=ecs.LogDrivers.aws_logs(stream_prefix="gateway", log_group=self.log_group),
+            readonly_root_filesystem=True,
         )
-        gateway.add_mount_points(
-            ecs.MountPoint(source_volume="docker-socket", container_path="/var/run/docker.sock", read_only=False)
+        gateway_role = gateway_td.task_role
+        self.github_key.grant_read(gateway_role)
+        self.sandbox_token.grant_read(gateway_role)
+        self.bucket.grant_read_write(gateway_role)
+        gateway_role.add_to_principal_policy(
+            iam.PolicyStatement(
+                sid="StartSandboxTasks",
+                actions=["ecs:RunTask"],
+                resources=[self.sandbox_td.task_definition_arn],
+                conditions={"ArnEquals": {"ecs:cluster": self.cluster.cluster_arn}},
+            )
         )
-        self.github_key.grant_read(gateway_td.task_role)
-        self.bucket.grant_read_write(gateway_td.task_role)
-        self.sandbox_repo.grant_pull(gateway_td.task_role)
-        self.gateway = ecs.Ec2Service(
+        gateway_role.add_to_principal_policy(
+            iam.PolicyStatement(
+                sid="ManageSandboxTasks",
+                actions=["ecs:StopTask", "ecs:DescribeTasks", "ecs:ListTasks", "ecs:TagResource"],
+                resources=["*"],
+                conditions={"ArnEquals": {"ecs:cluster": self.cluster.cluster_arn}},
+            )
+        )
+        gateway_role.add_to_principal_policy(
+            iam.PolicyStatement(
+                sid="PassSandboxExecutionRole",
+                actions=["iam:PassRole"],
+                resources=[self.sandbox_td.obtain_execution_role().role_arn],
+                conditions={"StringEquals": {"iam:PassedToService": "ecs-tasks.amazonaws.com"}},
+            )
+        )
+        self.gateway = ecs.FargateService(
             self,
             "Gateway",
             cluster=self.cluster,
             task_definition=gateway_td,
             desired_count=1 if running is None else running,
             vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
-            capacity_provider_strategies=[
-                ecs.CapacityProviderStrategy(capacity_provider=capacity.capacity_provider_name, weight=1)
-            ],
             circuit_breaker=ecs.DeploymentCircuitBreaker(rollback=True),
         )
         self._db_access(self.gateway.connections)
+        self.sandbox_sg.add_ingress_rule(
+            self.gateway.connections.security_groups[0], ec2.Port.tcp(7070), "gateway to sandbox executor"
+        )
 
         # ------------------------------------------------------------------ one-off tasks (run by the deploy workflow)
         self.admin_sg = ec2.SecurityGroup(self, "AdminTaskSg", vpc=self.vpc, description="One-off admin tasks")
@@ -370,7 +439,6 @@ class AieosStack(Stack):
             "ApiUrl": f"{'https' if certificate else 'http'}://{api.load_balancer.load_balancer_dns_name}",
             "ClusterName": self.cluster.cluster_name,
             "PlatformRepo": self.platform_repo.repository_uri,
-            "GatewayRepo": self.gateway_repo.repository_uri,
             "SandboxRepo": self.sandbox_repo.repository_uri,
             "AdminTaskDefinition": self.admin_td.task_definition_arn,
             "AdminSecurityGroup": self.admin_sg.security_group_id,
@@ -410,7 +478,7 @@ class AieosStack(Stack):
                 },
             ),
         )
-        for repo in (self.platform_repo, self.gateway_repo, self.sandbox_repo):
+        for repo in (self.platform_repo, self.sandbox_repo):
             repo.grant_pull_push(role)
         role.add_to_policy(
             iam.PolicyStatement(
@@ -472,3 +540,23 @@ def _retention(days: int) -> logs.RetentionDays:
         (365, logs.RetentionDays.ONE_YEAR),
     ]
     return next((r for d, r in options if d >= days), logs.RetentionDays.TWO_YEARS)
+
+
+def _s3_prefix_list(stack: Stack) -> str:
+    """The region's managed S3 prefix list, resolved at deploy time (no account lookup at synthesis)."""
+    from aws_cdk import custom_resources as cr
+
+    lookup = cr.AwsCustomResource(
+        stack,
+        "S3PrefixList",
+        on_update=cr.AwsSdkCall(
+            service="EC2",
+            action="describeManagedPrefixLists",
+            parameters={"Filters": [{"Name": "prefix-list-name", "Values": [f"com.amazonaws.{stack.region}.s3"]}]},
+            physical_resource_id=cr.PhysicalResourceId.of(f"s3-prefix-list-{stack.region}"),
+            output_paths=["PrefixLists.0.PrefixListId"],
+        ),
+        policy=cr.AwsCustomResourcePolicy.from_sdk_calls(resources=cr.AwsCustomResourcePolicy.ANY_RESOURCE),
+        install_latest_aws_sdk=False,
+    )
+    return lookup.get_response_field("PrefixLists.0.PrefixListId")
