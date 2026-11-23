@@ -107,6 +107,7 @@ services:
       OIDC_ISSUER: ${OIDC_ISSUER}
       OIDC_AUDIENCE: ${OIDC_AUDIENCE}
       OIDC_JWKS_PATH: /keys/jwks.json
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318   # service name defaults to aieos-agents / aieos-gateway
       TEMPORAL_ADDRESS: temporal:7233
       TEMPORAL_NAMESPACE: aieos-local
     volumes: &worker-volumes

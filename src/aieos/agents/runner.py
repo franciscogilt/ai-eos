@@ -37,6 +37,7 @@ from aieos.contracts.steps import AgentStepRequest, AgentStepResult
 from aieos.contracts.tools import ToolRequest
 from aieos.core.logging import get_logger
 from aieos.gateway.catalog import ToolCatalog, load_catalog
+from aieos.observability.telemetry import span
 from aieos.persistence.db import Database
 from aieos.providers.llm import ProviderRequestError
 from aieos.providers.metering import MeteringContext, UsageRecorder
@@ -168,6 +169,23 @@ class AgentRunner:
         return loaded
 
     async def run(self, request: AgentStepRequest, *, agent_run_id: UUID) -> AgentStepResult:
+        with span(
+            "agent.step",
+            **{
+                "gen_ai.operation.name": "invoke_agent",
+                "gen_ai.agent.name": request.agent_key,
+                "aieos.step": request.step_key,
+                "aieos.step.attempt": request.attempt,
+                "aieos.agent_run_id": agent_run_id,
+                "aieos.workflow_id": request.workflow_id,
+                "aieos.org_id": request.org_id,
+            },
+        ) as current:
+            result = await self._run(request, agent_run_id=agent_run_id)
+            current.set_attribute("aieos.step.status", result.status)
+            return result
+
+    async def _run(self, request: AgentStepRequest, *, agent_run_id: UUID) -> AgentStepResult:
         if request.agent_key not in PREPARERS and request.agent_key not in DELIVERY_PREPARERS:
             raise AgentNotAvailableError(f"agent {request.agent_key!r} has no step runner")
         loaded = self._verified(await self._published(request.org_id, agent_run_id))

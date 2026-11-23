@@ -11,6 +11,7 @@ from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from aieos.core.settings import TemporalSettings
+from aieos.observability.telemetry import temporal_interceptors
 from aieos.orchestration.models import ApprovalDecisionSignal, ClarificationAnswers, StartDeliveryInput
 from aieos.orchestration.workflows import AGENT_QUEUE, FeatureDeliveryWorkflow
 
@@ -30,6 +31,7 @@ async def connect(settings: TemporalSettings) -> Client:
         api_key=api_key,
         tls=settings.temporal_tls or api_key is not None,
         data_converter=pydantic_data_converter,
+        interceptors=temporal_interceptors(),
     )
 
 

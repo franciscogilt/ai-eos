@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import signal
 import sys
 from pathlib import Path
@@ -34,6 +35,7 @@ from aieos.gateway.handlers import artifact_handlers
 from aieos.gateway.sandbox_handlers import sandbox_handlers
 from aieos.gateway.service import ToolGateway
 from aieos.integrations.github.app import GitHubApp
+from aieos.observability.telemetry import setup_tracing
 from aieos.orchestration.activities import OrchestrationActivities
 from aieos.orchestration.client import connect
 from aieos.orchestration.tool_bridge import TemporalToolInvoker, ToolCallWorkflow
@@ -53,6 +55,12 @@ async def _run(kind: str, engineering: Path) -> None:
     # Workers reuse the API settings for the database and logging; OIDC values are not used here.
     settings = Settings()
     configure_logging(level=settings.log_level, json=settings.log_json)
+    provider = setup_tracing(
+        # OTEL_SERVICE_NAME is set per service in deployment; the default names the worker kind.
+        service_name=settings.otel_service_name if "OTEL_SERVICE_NAME" in os.environ else f"aieos-{kind}",
+        environment=settings.environment,
+        otlp_endpoint=settings.otel_exporter_otlp_endpoint,
+    )
     db = Database(
         settings.database_url.get_secret_value(),
         pool_size=settings.db_pool_size,
@@ -132,6 +140,8 @@ async def _run(kind: str, engineering: Path) -> None:
     async with worker:
         await stop.wait()  # graceful: in-flight activities finish or are retried elsewhere
     await db.dispose()
+    if provider is not None:
+        provider.shutdown()  # flush spans still in the batch queue
     log.info("worker.stopped", kind=kind)
 
 
