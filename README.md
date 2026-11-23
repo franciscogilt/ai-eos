@@ -21,6 +21,8 @@ golden set against the configured real models with a hard spending cap (also ava
 manual `agent-evals` GitHub Actions workflow).
 
 ### Before any agent can call a model
+**AWS:** infrastructure code and a manual deploy workflow are in `infrastructure/aws` (nothing deployed yet); see `docs/aws.md`.
+
 **No API bills:** set `MODEL_ROUTING_PATH=engineering/model-routing.local.yaml` to use the coding CLIs you are
 already signed in to (Claude Code, Gemini CLI, Codex) or Ollama. See `docs/local-models.md`.
 

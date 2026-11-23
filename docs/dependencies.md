@@ -30,3 +30,4 @@ TestClient (it emits a deprecation warning with `httpx`); switching is a dev-onl
 
 No vendor SDK is planned: model access stays in `aieos.providers.adapters` (ADR-0002).
 The user CLI (`aieos`) uses only the standard library, so typer is no longer planned.
+| aws-cdk-lib, constructs | AWS IaC (infra group only) | Infrastructure as code in the platform's language, testable offline (ADR-0003); never installed in the platform images | Terraform (separate language and toolchain) |
