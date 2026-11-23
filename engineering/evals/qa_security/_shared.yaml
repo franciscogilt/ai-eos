@@ -1,0 +1,52 @@
+# Shared context for QA/Security cases: one task (CSV export) from an approved spec and design.
+# Each case adds the patch under review and the platform's evidence (tests, scan findings).
+context:
+  task: {key: T-1, title: CSV export endpoint}
+  requirements:
+    summary: CSV export of reports
+    facts: [The Reports page lists reports the user may view]
+    assumptions: []
+    requirements:
+      - id: REQ-1
+        statement: Users can export a report they may view as a CSV file
+        priority: must
+        sources: [{kind: request, ref: add an Export CSV button}]
+      - id: REQ-2
+        statement: Exports respect the user's report permissions
+        priority: must
+        sources: [{kind: request, ref: Exports must respect report permissions}]
+    acceptance_criteria:
+      - id: AC-1
+        requirement_ids: [REQ-1]
+        given: a report the user may view
+        when: "they request GET /reports/{id}.csv"
+        then: a CSV with a header row is returned
+      - id: AC-2
+        requirement_ids: [REQ-2]
+        given: a report the user may not view
+        when: they request its CSV
+        then: the response is 403 and no data is returned
+    open_questions: []
+    out_of_scope: []
+  design:
+    overview: Add a CSV endpoint next to the existing report endpoint, reusing its permission check.
+    components:
+      - name: reports-api
+        responsibility: serve report CSV
+        change_type: modified
+        files_expected: [app/reports.py, tests/test_reports.py]
+    interfaces: ["GET /reports/{id}.csv"]
+    data_model_changes: []
+    decisions: []
+    security_considerations: [Reuse can_view_report(user, report) before reading any rows]
+    risks: []
+    diagram_mermaid: null
+    proposed_tasks:
+      - key: T-1
+        title: CSV export endpoint
+        description: "Add GET /reports/{id}.csv"
+        acceptance_criteria_ids: [AC-1, AC-2]
+        depends_on: []
+        assigned_agent_key: developer
+  tests: {passed: true, exit_code: 0, stdout: "4 passed in 0.31s"}
+  scan_findings: []
