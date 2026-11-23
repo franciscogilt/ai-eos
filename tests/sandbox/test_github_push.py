@@ -245,7 +245,8 @@ def test_tasks_stack_and_push_as_one_commit(setup):
         ("src/csv.py", "add"),
         ("tests/test_csv.py", "add"),
     ]
-    with pytest.raises(ToolInputError, match="does not apply"):  # out of order: task 2 needs task 1
+    # Out of order: task 2 modifies a file only task 1 creates, so the base check refuses it before applying.
+    with pytest.raises(ToolInputError, match="not in the base commit"):
         asyncio.run(
             gh.push_branch(ctx("github.push_branch", wf), {"patch_artifact_ids": [p2], "branch": f"aieos/{wf}"})
         )
