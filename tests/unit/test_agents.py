@@ -323,3 +323,16 @@ def test_eval_budget_stops_the_suite(loaded, catalog):
         run_case(case, loaded=loaded["requirements"], catalog=catalog, router=router, budget=SuiteBudget(Decimal("0")))
     )
     assert not result.passed and result.error == "BudgetExceededError"
+
+
+def test_eval_uses_the_configured_routing_file(monkeypatch, tmp_path):
+    from pathlib import Path
+
+    from aieos.evals import harness
+
+    seen: dict[str, Path] = {}
+    monkeypatch.setattr(harness, "load_routing_config", lambda path: seen.setdefault("path", path) and 1 / 0)
+    monkeypatch.setenv("MODEL_ROUTING_PATH", "engineering/model-routing.local.yaml")
+    with pytest.raises(ZeroDivisionError):
+        harness.main(["--agent", "requirements", "--cases", str(tmp_path)])
+    assert seen["path"] == Path("engineering/model-routing.local.yaml")

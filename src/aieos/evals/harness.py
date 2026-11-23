@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -172,7 +173,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--agent", required=True, choices=sorted(PREPARERS))
     parser.add_argument("--cases", type=Path, required=True)
     parser.add_argument("--engineering", type=Path, default=Path("engineering"))
-    parser.add_argument("--routing", type=Path, default=Path("engineering/model-routing.yaml"))
+    parser.add_argument(
+        "--routing",
+        type=Path,
+        # Same setting the agent worker uses, so evals run on the models the platform will use.
+        default=Path(os.environ.get("MODEL_ROUTING_PATH") or "engineering/model-routing.yaml"),
+    )
     parser.add_argument("--max-usd", type=Decimal, default=Decimal("2"))
     parser.add_argument("--report", type=Path)
     args = parser.parse_args(argv)
