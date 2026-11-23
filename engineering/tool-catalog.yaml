@@ -38,6 +38,15 @@ tools:
     idempotent: true
 
   # ---------------- Level 2: isolated execution, automatic under limits ----------------
+  - name: sandbox.prepare
+    level: 2
+    description: >-
+      Create the run's sandbox from the workflow's base snapshot, commit already-approved patches into
+      its base, and apply a patch under rework or review to the working tree. Called by the platform
+      before the agent starts; never offered to a model.
+    executes_in: sandbox
+    idempotent: true
+    model_visible: false
   - name: sandbox.write_file
     level: 2
     description: Create or modify a file in the task's sandbox workspace.

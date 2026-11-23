@@ -225,6 +225,22 @@ class DeveloperResult(_Schema):
         return self
 
 
+class DeveloperSubmission(_Schema):
+    """What the Developer *model* submits. The patch and test report in the step's `DeveloperResult`
+    are produced by the platform from the sandbox, never taken from the model's word."""
+
+    status: Literal["implemented", "blocked"]
+    summary: str = Field(min_length=1, max_length=4000)
+    tests_added: list[str] = Field(default=[], max_length=100)
+    blocked_reason: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def _consistent(self) -> DeveloperSubmission:
+        if self.status == "blocked" and not self.blocked_reason:
+            raise ValueError("blocked requires blocked_reason")
+        return self
+
+
 # --------------------------------------------------------------------------- qa / security
 class ReviewInput(_Schema):
     task: PlannedTask
@@ -270,6 +286,7 @@ SCHEMA_REGISTRY: dict[str, type[BaseModel]] = {
         ArchitectureDesign,
         DeveloperTaskInput,
         DeveloperResult,
+        DeveloperSubmission,
         ReviewInput,
         ReviewReport,
     )

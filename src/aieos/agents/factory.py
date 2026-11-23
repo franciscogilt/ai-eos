@@ -9,6 +9,7 @@ and every result it sees is wrapped as untrusted data. Model access is provider-
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -109,8 +110,8 @@ def build_agent(
     tools: dict[str, AgentTool] = {}
     for name in contract.tools:
         spec = catalog.get(name)
-        if spec is None or spec.executes_in == "orchestrator":
-            continue
+        if spec is None or spec.executes_in == "orchestrator" or not spec.model_visible:
+            continue  # orchestrator and platform-only tools are never offered to a model
         if name not in TOOL_ARG_SCHEMAS:
             raise KeyError(f"no argument schema for tool {name}")
         tool = _gateway_tool(name, spec.description, invoker, scope)
@@ -125,7 +126,7 @@ def build_agent(
     )
 
 
-Validator = Callable[[Any], list[str]]
+Validator = Callable[[Any], Any]  # -> list[str], or an awaitable of it (platform checks)
 
 
 async def run_with_retries(
@@ -163,7 +164,8 @@ async def run_with_retries(
         if not isinstance(output, output_type):
             feedback = [f"output must be a {output_type.__name__} object"]
             continue
-        feedback = validate(output)
+        verdict = validate(output)
+        feedback = await verdict if inspect.isawaitable(verdict) else verdict
         if not feedback:
             return output, attempt
         log.warning("agent.grounding_violation", agent=agent.name, attempt=attempt, violations=len(feedback))

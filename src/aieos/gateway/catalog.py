@@ -24,6 +24,8 @@ class ToolSpec(BaseModel):
     description: str
     executes_in: Literal["gateway", "sandbox", "orchestrator"]
     idempotent: bool
+    # False: only the platform (agent runner or orchestrator) calls it for the run; models never see it.
+    model_visible: bool = True
     # Shared/sensitive tools only: approval request expires after this many minutes.
     approval_ttl_minutes: int | None = Field(default=None, gt=0, le=7 * 24 * 60)
 

@@ -379,3 +379,28 @@ def test_pull_request_uses_default_branch_and_workflow_branch():
 
 def test_fake_tarball_helper_roundtrip():
     assert tarball({"a.txt": ("100644", b"x")})[:2] == b"\x1f\x8b"
+
+
+def test_net_changes_compose_stacked_patches():
+    from aieos.integrations.github.patch import FileChange as F
+    from aieos.integrations.github.patch import net_changes
+
+    net = net_changes(
+        [
+            [F("a.py", "add", "100644"), F("b.py", "modify"), F("gone.txt", "delete"), F("tmp.txt", "add", "100644")],
+            [
+                F("a.py", "modify", "100755"),
+                F("b.py", "delete"),
+                F("gone.txt", "add", "100644"),
+                F("tmp.txt", "delete"),
+            ],
+        ]
+    )
+    assert [(c.path, c.kind, c.mode) for c in net] == [
+        ("a.py", "add", "100755"),  # added then modified: still an add, latest mode
+        ("b.py", "delete", None),
+        ("gone.txt", "modify", "100644"),  # deleted then re-added: a modify of the base file
+    ]  # tmp.txt added then deleted: no change at all
+    for bad in ([[F("x", "delete")], [F("x", "modify")]], [[F("x", "add")], [F("x", "add")]]):
+        with pytest.raises(PatchRejectedError):
+            net_changes(bad)

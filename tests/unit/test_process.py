@@ -71,11 +71,17 @@ class FakeRuntime:
         return [e.status for e in self.events if e.kind == "workflow_status"]
 
 
+def _patch_of(rt: FakeRuntime, dev_step: AgentStepRequest) -> str:
+    """The patch the review after this developer step looked at."""
+    i = rt.steps.index(dev_step)
+    return rt.steps[i + 1].inputs["patch_artifact_id"]
+
+
 def default_result(agent: str) -> AgentStepResult:
     output: dict[str, Any] = {
         "requirements": {"open_questions": []},
         "architecture": {"tasks": TASKS},
-        "developer": {"patch_artifact_id": str(uuid.uuid4())},
+        "developer": {"status": "implemented", "patch": {"artifact_id": str(uuid.uuid4())}},
         "qa_security": {"verdict": "approve"},
     }[agent]
     return AgentStepResult(status="completed", summary=f"{agent} done", output=output)
@@ -123,6 +129,16 @@ def test_happy_path_with_merge_approval():
         "develop:T-2",
         "review:T-2",
     ]  # dependency order
+    assert [c.tool_name for c in rt.tool_calls][:2] == ["github.push_branch", "github.create_pull_request"]
+    patches = [_patch_of(rt, s) for s in rt.steps if s.agent_key == "developer"]
+    push = rt.tool_calls[0]
+    assert push.arguments["patch_artifact_ids"] == patches and push.arguments["branch"].startswith("aieos/")
+    dev_steps = [s for s in rt.steps if s.agent_key == "developer"]
+    assert dev_steps[0].inputs["base_patches"] == [] and dev_steps[1].inputs["base_patches"] == patches[:1]
+    reviews = [s for s in rt.steps if s.agent_key == "qa_security"]
+    assert [r.inputs["patch_artifact_id"] for r in reviews] == patches
+    assert reviews[1].inputs["base_patches"] == patches[:1]  # review runs on top of approved work
+    assert dev_steps[0].inputs["design"] == {"tasks": TASKS}  # full context, not just the task ref
     merge_calls = [c for c in rt.tool_calls if c.tool_name == "github.merge_pull_request"]
     assert len(merge_calls) == 2 and merge_calls[0].call_id == merge_calls[1].call_id  # same idempotency key
     assert merge_calls[0].arguments["pull_request"] == 7
@@ -186,6 +202,9 @@ def test_rework_passes_findings_to_developer():
     assert outcome.status == "succeeded"
     dev_t1 = [s for s in rt.steps if s.step_key == "develop:T-1"]
     assert len(dev_t1) == 2 and dev_t1[1].inputs["feedback"] == findings
+    first_patch = next(s for s in rt.steps if s.step_key == "review:T-1").inputs["patch_artifact_id"]
+    assert dev_t1[1].inputs["previous_patch"] == first_patch  # rework continues from the rejected patch
+    assert dev_t1[1].inputs["base_patches"] == []  # a rejected patch is never part of the base
     gates = [e for e in rt.events if e.kind == "gate" and e.task_key == "T-1"]
     assert [g.result for g in gates] == ["failed", "passed"]
 

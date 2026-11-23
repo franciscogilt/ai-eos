@@ -184,6 +184,6 @@ def test_exhausted_budget_stops_before_any_model_call(provisioned_db, org):
 def test_unimplemented_agent(provisioned_db, org):
     wf = seed_workflow(provisioned_db.owner_conninfo, org)["workflow"]
     with pytest.raises(ApplicationError) as err:
-        run_step(provisioned_db, org, wf, "developer", {}, FakeModel())
+        run_step(provisioned_db, org, wf, "supervisor", {}, FakeModel())  # decided by the orchestrator
     assert err.value.type == "AgentNotAvailable"
     assert Decimal(sql(provisioned_db, "SELECT spent_usd FROM workflows WHERE id = %s", (wf,))[0][0]) == 0

@@ -160,3 +160,31 @@ def validate_patch(patch: bytes) -> list[FileChange]:
     if len(set(paths)) != len(paths):
         raise PatchRejectedError("the patch changes the same path twice")
     return changes
+
+
+def net_changes(patches: list[list[FileChange]]) -> list[FileChange]:
+    """Combine sequential patches (each made on top of the previous ones) into the net change against
+    the first patch's base. A file added then deleted disappears; deleted then re-added is a modify."""
+    state: dict[str, FileChange] = {}
+    for changes in patches:
+        for c in changes:
+            prev = state.get(c.path)
+            if c.kind == "add":
+                if prev is not None and prev.kind != "delete":
+                    raise PatchRejectedError(f"{c.path}: added by a later patch but it already exists")
+                state[c.path] = FileChange(c.path, "modify" if prev is not None else "add", c.mode or "100644")
+            elif c.kind == "modify":
+                if prev is not None and prev.kind == "delete":
+                    raise PatchRejectedError(f"{c.path}: modified after an earlier patch deleted it")
+                mode = c.mode or (prev.mode if prev else None)
+                state[c.path] = FileChange(c.path, "add" if prev is not None and prev.kind == "add" else "modify", mode)
+            else:
+                if prev is not None and prev.kind == "delete":
+                    raise PatchRejectedError(f"{c.path}: deleted twice")
+                if prev is not None and prev.kind == "add":
+                    del state[c.path]
+                else:
+                    state[c.path] = FileChange(c.path, "delete")
+    if len(state) > MAX_FILES:
+        raise PatchRejectedError(f"the combined change touches more than {MAX_FILES} files")
+    return [state[p] for p in sorted(state)]

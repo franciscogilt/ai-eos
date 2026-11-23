@@ -33,8 +33,9 @@ from sqlalchemy import text
 from aieos.artifacts.store import ArtifactStore
 from aieos.core.logging import get_logger
 from aieos.gateway.handlers import Handler, ToolContext, ToolFailedError, ToolInputError, ToolTransientError
+from aieos.gateway.sandbox_handlers import apply_patch
 from aieos.integrations.github.app import GitHubApp, GitHubError, GitHubRepo, RepoRef
-from aieos.integrations.github.patch import FileChange, PatchRejectedError, validate_patch
+from aieos.integrations.github.patch import FileChange, PatchRejectedError, net_changes, validate_patch
 from aieos.persistence.db import Database
 from aieos.sandbox.docker import DockerSandboxManager, SandboxError, SandboxKey
 
@@ -257,25 +258,43 @@ class GitHubTools:
         return None
 
     async def push_branch(self, ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+        """Push the approved patches (in order; each made on top of the previous ones) as one commit."""
         if self._sandboxes is None:
             raise ToolFailedError("pushing needs the sandbox backend (SANDBOX_BACKEND=docker)")
         branch = check_branch(args.get("branch"), ctx.workflow_id)
+        raw_ids = args.get("patch_artifact_ids")
+        if raw_ids is None and args.get("patch_artifact_id") is not None:
+            raw_ids = [args["patch_artifact_id"]]
+        if not isinstance(raw_ids, list) or not 1 <= len(raw_ids) <= 100:
+            raise ToolInputError("patch_artifact_ids must list 1 to 100 patch artifacts, in order")
         try:
-            artifact_id = UUID(str(args.get("patch_artifact_id")))
+            artifact_ids = [UUID(str(x)) for x in raw_ids]
         except ValueError:
-            raise ToolInputError("patch_artifact_id (uuid) is required") from None
-        row, patch = await self._store.get(ctx.org_id, artifact_id)
-        if row.kind != "patch" or row.workflow_id != ctx.workflow_id:
-            raise ToolInputError("patch_artifact_id must be a patch artifact of this workflow")
+            raise ToolInputError("patch_artifact_ids must contain artifact ids") from None
+        patches: list[bytes] = []
+        digests: list[str] = []
+        per_patch: list[list[FileChange]] = []
+        for artifact_id in artifact_ids:
+            row, patch = await self._store.get(ctx.org_id, artifact_id)
+            if row.kind != "patch" or row.workflow_id != ctx.workflow_id:
+                raise ToolInputError(f"{artifact_id} is not a patch artifact of this workflow")
+            try:
+                per_patch.append(validate_patch(patch))
+            except PatchRejectedError as exc:
+                raise ToolInputError(f"patch {artifact_id} rejected: {exc}") from None
+            patches.append(patch)
+            digests.append(row.sha256)
         try:
-            changes = validate_patch(patch)
+            changes = net_changes(per_patch)
         except PatchRejectedError as exc:
-            raise ToolInputError(f"patch rejected: {exc}") from None
+            raise ToolInputError(f"patches do not stack: {exc}") from None
+        if not changes:
+            raise ToolInputError("the patches cancel out; nothing to push")
 
         wr = await self.workflow_repo(ctx.org_id, ctx.workflow_id)
         repo = self._app.repo(wr.repo)
         snap = await self._snapshot(wr)
-        files = await self._apply_in_sandbox(ctx, artifact_id, snap, patch, changes, repo, wr.base_sha)
+        files = await self._apply_in_sandbox(ctx, artifact_ids, snap, patches, changes, repo, wr.base_sha)
 
         base_tree = await self._github(repo.commit_tree(wr.base_sha))
         cache: dict[str, Any] = {}
@@ -293,10 +312,8 @@ class GitHubTools:
             mode = c.mode or (base["mode"] if base else "100644")
             entries.append({"path": c.path, "mode": mode, "type": "blob", "sha": blobs[digest]})
         tree = await self._github(repo.create_tree(base_tree, entries))
-        message = (
-            f"{wr.title[:72]}\n\nPushed by AI-EOS for workflow {ctx.workflow_id}.\n"
-            f"Patch artifact {artifact_id} (sha256 {row.sha256})."
-        )
+        provenance = "\n".join(f"Patch artifact {a} (sha256 {d})." for a, d in zip(artifact_ids, digests, strict=True))
+        message = f"{wr.title[:72]}\n\nPushed by AI-EOS for workflow {ctx.workflow_id}.\n{provenance}"
         commit = await self._github(repo.create_commit(message, tree, wr.base_sha))
         await self._github(repo.set_branch(branch, commit))
         log.info("github.pushed", workflow_id=str(ctx.workflow_id), branch=branch, commit=commit, files=len(changes))
@@ -304,15 +321,16 @@ class GitHubTools:
             "branch": branch,
             "commit_sha": commit,
             "base_commit_sha": wr.base_sha,
+            "patches": [str(a) for a in artifact_ids],
             "files_changed": [{"path": c.path, "change": c.kind} for c in changes],
         }
 
     async def _apply_in_sandbox(
         self,
         ctx: ToolContext,
-        artifact_id: UUID,
+        artifact_ids: list[UUID],
         snap: _Snapshot,
-        patch: bytes,
+        patches: list[bytes],
         changes: list[FileChange],
         repo: GitHubRepo,
         base_sha: str,
@@ -322,7 +340,7 @@ class GitHubTools:
         key = SandboxKey(
             org_id=ctx.org_id,
             workflow_id=ctx.workflow_id,
-            agent_run_id=uuid.uuid5(_PUSH_NAMESPACE, f"{ctx.agent_run_id}:{artifact_id}"),
+            agent_run_id=uuid.uuid5(_PUSH_NAMESPACE, f"{ctx.agent_run_id}:{','.join(map(str, artifact_ids))}"),
         )
 
         async def seed() -> bytes:
@@ -332,13 +350,11 @@ class GitHubTools:
             await sandboxes.destroy(key)  # a leftover from an interrupted attempt is never reused
             await sandboxes.ensure(key, snapshot=seed)
             await self._verify_base(sandboxes, key, changes, repo, base_sha)
-            applied = await sandboxes.run(
-                key, ["git", "-c", "core.attributesFile=/dev/null", "apply", "--whitespace=nowarn", "-"], stdin=patch
-            )
-            if applied.exit_code != 0:
-                raise ToolInputError(
-                    "patch does not apply to the base commit: " + applied.stderr.decode(errors="replace")[:300]
-                )
+            for artifact_id, patch in zip(artifact_ids, patches, strict=True):
+                try:
+                    await apply_patch(sandboxes, key, patch, what=f"patch {artifact_id}")
+                except ToolInputError as exc:
+                    raise ToolInputError(f"{exc} (to the base commit plus the earlier patches)") from None
             status = await sandboxes.run(
                 key,
                 [
@@ -356,14 +372,13 @@ class GitHubTools:
             for item in status.stdout.decode("utf-8", errors="replace").split("\x00"):
                 if item:
                     code, path = item[:2], item[3:]
-                    found[path] = {"??": "add", " D": "delete"}.get(code, "modify" if code == " M" else code)
+                    found[path] = {"??": "add", " D": "delete", " M": "modify"}.get(code, code)
             expected = {c.path: c.kind for c in changes}
             if found != expected:
-                raise ToolFailedError("applying the patch changed different files than it declares; not pushed")
+                raise ToolFailedError("applying the patches changed different files than they declare; not pushed")
             wanted = [c.path for c in changes if c.kind != "delete"]
-            return {
-                p: data for p, (data, _) in (await sandboxes.read_files(key, wanted, max_bytes=MAX_PUSH_BYTES)).items()
-            }
+            read = await sandboxes.read_files(key, wanted, max_bytes=MAX_PUSH_BYTES)
+            return {p: data for p, (data, _) in read.items()}
         except SandboxError as exc:
             raise ToolFailedError(f"push sandbox failed: {exc}") from None
         finally:

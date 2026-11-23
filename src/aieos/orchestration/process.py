@@ -83,6 +83,9 @@ class DeliveryProcess:
         self._pending_approval: UUID | None = None
         self._cancel_reason: str | None = None
         self._supervisor_run: UUID | None = None
+        # Approved patch artifacts, in task order. Each task's sandbox starts from base + these,
+        # and the final push applies them in this order.
+        self._approved_patches: list[str] = []
 
     # ------------------------------------------------------------------ signals / query
     def answer(self, answers: ClarificationAnswers) -> None:
@@ -127,6 +130,11 @@ class DeliveryProcess:
                 )
             )
             branch = f"aieos/{wf}"
+            await self._tool(
+                "push-branch",
+                "github.push_branch",
+                {"branch": branch, "patch_artifact_ids": list(self._approved_patches)},
+            )
             pr = await self._tool(
                 "open-pull-request",
                 "github.create_pull_request",
@@ -196,7 +204,9 @@ class DeliveryProcess:
 
     async def _deliver_task(self, task: PlannedTaskRef, spec: AgentStepResult, design: AgentStepResult) -> None:
         org, wf = self._in.org_id, self._in.workflow_id
+        context = {"task": task.model_dump(mode="json"), "requirements": spec.output, "design": design.output}
         feedback: list[Any] = []
+        previous_patch: str | None = None
         for attempt in range(1, self._in.limits.max_rework_rounds + 2):
             await self._record(
                 TaskEvent(org_id=org, workflow_id=wf, task_key=task.key, status="running", attempt=attempt)
@@ -204,11 +214,19 @@ class DeliveryProcess:
             dev = await self._agent_step(
                 f"develop:{task.key}",
                 "developer",
-                {"task": task.model_dump(mode="json"), "feedback": feedback},
+                {
+                    **context,
+                    "base_patches": list(self._approved_patches),
+                    "previous_patch": previous_patch,
+                    "feedback": feedback,
+                },
                 attempt=attempt,
             )
             if dev.status == "blocked":
                 raise StepFailedError(f"task {task.key} blocked: {dev.summary}")
+            patch_id = (dev.output.get("patch") or {}).get("artifact_id")
+            if not isinstance(patch_id, str):
+                raise StepFailedError(f"task {task.key}: developer step returned no patch")
             await self._record(
                 TaskEvent(org_id=org, workflow_id=wf, task_key=task.key, status="in_review", attempt=attempt)
             )
@@ -216,9 +234,11 @@ class DeliveryProcess:
                 f"review:{task.key}",
                 "qa_security",
                 {
-                    "task": task.model_dump(mode="json"),
-                    "patch": dev.output,
+                    **context,
+                    "base_patches": list(self._approved_patches),
+                    "patch_artifact_id": patch_id,
                     "author_agent_run_id": str(dev.agent_run_id),
+                    "developer_summary": dev.summary,
                 },
                 attempt=attempt,
             )
@@ -230,15 +250,17 @@ class DeliveryProcess:
                     gate_key="independent_review",
                     task_key=task.key,
                     result="passed" if approved else "failed",
-                    details={"attempt": attempt, "summary": review.summary},
+                    details={"attempt": attempt, "summary": review.summary, "patch_artifact_id": patch_id},
                 )
             )
             if approved:
+                self._approved_patches.append(patch_id)
                 await self._record(
                     TaskEvent(org_id=org, workflow_id=wf, task_key=task.key, status="succeeded", attempt=attempt)
                 )
                 return
             feedback = list(review.output.get("findings", []))
+            previous_patch = patch_id
         await self._record(
             TaskEvent(
                 org_id=org,

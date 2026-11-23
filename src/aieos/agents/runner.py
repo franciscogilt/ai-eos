@@ -7,27 +7,29 @@ For the run it is given:
   3. Build the agent with gateway-backed tools, run it with grounding retries.
   4. Store the output as an artifact through the gateway; return a compact step result.
 
-Implemented agents: requirements, architecture. Others raise AgentNotAvailableError until B15.
+Implemented agents: requirements, architecture (here), developer and qa_security (`delivery`).
+The supervisor's decisions are made by the deterministic orchestrator, so it has no step here.
 """
 
 from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 from sqlalchemy import text
 
+from aieos.agents.delivery import prepare_developer, prepare_qa_security
 from aieos.agents.errors import AgentNotAvailableError, ContractViolationError, ModelRequestRejectedError
 from aieos.agents.factory import RunScope, ToolInvoker, build_agent, run_with_retries
 from aieos.agents.grounding import architecture_violations, requirement_grounding_violations
 from aieos.agents.loop import AgentDefinition
 from aieos.agents.registry import LoadedContract, load_all
+from aieos.agents.steps import AsyncPreparer, Prepared, StepTools, resolve
 from aieos.agents.untrusted import wrap_untrusted
 from aieos.contracts.io import ArchitectureDesign, RequirementsInput, RequirementsSpec
 from aieos.contracts.steps import AgentStepRequest, AgentStepResult
@@ -40,16 +42,6 @@ from aieos.providers.metering import MeteringContext, UsageRecorder
 from aieos.providers.router import ModelNotConfiguredError, ModelRouter
 
 log = get_logger(__name__)
-
-
-@dataclass(frozen=True)
-class Prepared:
-    message: str
-    output_type: type[BaseModel]
-    validate: Callable[[Any], list[str]]
-    to_output: Callable[[Any], dict[str, Any]]
-    summary: Callable[[Any], str]
-    artifact_kind: str
 
 
 def prepare_requirements(inputs: dict[str, Any], scope: RunScope) -> Prepared:
@@ -114,9 +106,15 @@ def prepare_architecture(inputs: dict[str, Any], scope: RunScope) -> Prepared:
     )
 
 
+# Steps that need no tools to prepare (also used by the eval harness).
 PREPARERS: dict[str, Callable[[dict[str, Any], RunScope], Prepared]] = {
     "requirements": prepare_requirements,
     "architecture": prepare_architecture,
+}
+# Steps whose preparation and checks use the sandbox through the gateway.
+DELIVERY_PREPARERS: dict[str, AsyncPreparer] = {
+    "developer": prepare_developer,
+    "qa_security": prepare_qa_security,
 }
 
 
@@ -167,9 +165,8 @@ class AgentRunner:
         return loaded
 
     async def run(self, request: AgentStepRequest, *, agent_run_id: UUID) -> AgentStepResult:
-        prepare = PREPARERS.get(request.agent_key)
-        if prepare is None:
-            raise AgentNotAvailableError(f"agent {request.agent_key!r} is not implemented yet")
+        if request.agent_key not in PREPARERS and request.agent_key not in DELIVERY_PREPARERS:
+            raise AgentNotAvailableError(f"agent {request.agent_key!r} has no step runner")
         loaded = self._verified(await self._published(request.org_id, agent_run_id))
         contract = loaded.contract
         ctx = MeteringContext(
@@ -191,7 +188,12 @@ class AgentRunner:
             agent_run_id=agent_run_id,
             max_tool_calls=contract.limits.max_tool_calls,
         )
-        prepared = prepare(request.inputs, scope)
+        if request.agent_key in PREPARERS:
+            prepared = PREPARERS[request.agent_key](request.inputs, scope)
+        else:
+            prepared = await DELIVERY_PREPARERS[request.agent_key](
+                request.inputs, scope, StepTools(self._invoker, scope)
+            )
 
         def make_agent(attempt: int) -> AgentDefinition:
             scope.attempt = attempt
@@ -217,7 +219,7 @@ class AgentRunner:
         except ProviderRequestError as exc:
             raise ModelRequestRejectedError(str(exc)) from None
 
-        payload = prepared.to_output(output)
+        payload = await resolve(prepared.to_output(output))
         artifact_ids: list[UUID] = []
         stored = await self._invoker.invoke(
             ToolRequest(
@@ -239,7 +241,7 @@ class AgentRunner:
             log.warning("agent.output_not_stored", agent=contract.key, status=stored.status, reason=stored.reason)
         log.info("agent.step_completed", agent=contract.key, attempts=attempts, tool_calls=scope.tool_calls)
         return AgentStepResult(
-            status="completed",
+            status="blocked" if prepared.status(output) == "blocked" else "completed",
             summary=prepared.summary(output),
             output=payload,
             artifact_ids=artifact_ids,
