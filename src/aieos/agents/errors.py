@@ -27,3 +27,9 @@ class AgentLimitError(AgentStepError):
     """Turn, tool-call or time limit from the contract was reached."""
 
     error_type = "AgentLimitExceeded"
+
+
+class ModelRequestRejectedError(AgentStepError):
+    """A provider rejected the request (bad model id, schema, key). Retrying cannot help."""
+
+    error_type = "ModelRequestRejected"

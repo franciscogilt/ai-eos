@@ -28,7 +28,9 @@ from aieos.contracts.io import RequirementsSpec
 from aieos.contracts.tools import ToolRequest, ToolResult
 from aieos.gateway.catalog import ToolCatalog, load_catalog
 from aieos.providers.config import load_routing_config
+from aieos.providers.llm import ProviderError
 from aieos.providers.metering import BudgetExceededError, BudgetStatus, MeteringContext
+from aieos.providers.models import ModelUnavailableError
 from aieos.providers.pricing import TokenUsage
 from aieos.providers.router import ModelRouter
 
@@ -142,14 +144,14 @@ async def run_case(
                 loaded, catalog=catalog, invoker=NoTools(), scope=scope, output_type=prepared.output_type
             ),
             prepared.message,
-            provider=router.provider_for_run(contract, ctx, budget),
+            model=router.model_for_run(contract, ctx, budget),
             output_type=prepared.output_type,
             validate=prepared.validate,
             max_turns=contract.limits.max_turns,
             timeout_seconds=contract.limits.timeout_seconds,
             max_retries=contract.failure_handling.max_retries,
         )
-    except (AgentStepError, BudgetExceededError) as exc:
+    except (AgentStepError, BudgetExceededError, ProviderError, ModelUnavailableError) as exc:
         return CaseResult(case.id, False, [Check("completed", False, str(exc))], error=type(exc).__name__)
     checks = check_requirements(output, case.expect) if case.agent == "requirements" else []
     if "max_attempts" in case.expect:

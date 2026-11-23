@@ -4,22 +4,23 @@ import asyncio
 import uuid
 from decimal import Decimal
 
-import httpx
-import openai
 import pytest
-from agents import Agent, OpenAIChatCompletionsModel, OpenAIResponsesModel, RunConfig, Runner
 from pydantic import ValidationError
 from tests.fakes import FakeModel, MemoryRecorder, response
 
 from aieos.agents.independence import IndependenceError, check_model_independence
 from aieos.agents.registry import load_all
 from aieos.contracts.agent_contract import ModelRef
+from aieos.providers.adapters.anthropic import AnthropicChatModel
+from aieos.providers.adapters.gemini import GeminiChatModel
+from aieos.providers.adapters.openai_chat import OpenAIChatModel
 from aieos.providers.circuit import CircuitBreaker
 from aieos.providers.config import Price, ProviderConfig, RoutingConfig
+from aieos.providers.llm import ChatRequest, ProviderRequestError, ProviderTransientError, UserMessage
 from aieos.providers.metering import BudgetExceededError, MeteringContext
 from aieos.providers.models import Candidate, MeteredModel, ModelUnavailableError
 from aieos.providers.pricing import TokenUsage, cost_usd
-from aieos.providers.router import ModelNotConfiguredError, ModelRouter, openai_model_factory
+from aieos.providers.router import ModelNotConfiguredError, ModelRouter, http_model_factory
 
 PRICE = Price(input_per_mtok=Decimal("2"), cached_input_per_mtok=Decimal("0.5"), output_per_mtok=Decimal("8"))
 CTX = MeteringContext(
@@ -33,7 +34,7 @@ CTX = MeteringContext(
 
 
 def transient() -> Exception:
-    return openai.APIConnectionError(request=httpx.Request("POST", "https://provider.test/v1/responses"))
+    return ProviderTransientError("p: connection failed")
 
 
 def routing(**overrides) -> RoutingConfig:
@@ -41,17 +42,19 @@ def routing(**overrides) -> RoutingConfig:
         "api_version": "aieos/v1",
         "providers": {
             "openai": {"kind": "openai", "api_key_env": "OPENAI_API_KEY"},
-            "anthropic": {
-                "kind": "openai_compatible",
-                "api_key_env": "SECONDARY_PROVIDER_API_KEY",
-                "base_url_env": "SECONDARY_PROVIDER_BASE_URL",
-            },
+            "anthropic": {"kind": "anthropic", "api_key_env": "ANTHROPIC_API_KEY"},
+            "gemini": {"kind": "gemini", "api_key_env": "GEMINI_API_KEY", "send_temperature": False},
+            "local": {"kind": "openai_compatible", "api_key_env": "LOCAL_API_KEY", "base_url_env": "LOCAL_BASE_URL"},
         },
         "models": {
-            "openai": {"reasoning_high": "model-a", "reasoning_standard": "model-s"},
-            "anthropic": {"reasoning_high": "model-b"},
+            "anthropic": {"reasoning_high": "model-a", "reasoning_standard": "model-s"},
+            "gemini": {"reasoning_high": "model-b"},
+            "openai": {"reasoning_high": "model-o"},
         },
-        "pricing": {k: PRICE.model_dump() for k in ("openai/model-a", "openai/model-s", "anthropic/model-b")},
+        "pricing": {
+            k: PRICE.model_dump()
+            for k in ("anthropic/model-a", "anthropic/model-s", "gemini/model-b", "openai/model-o")
+        },
     }
     base.update(overrides)
     return RoutingConfig.model_validate(base)
@@ -119,12 +122,12 @@ def test_shipped_routing_file_is_valid_but_unconfigured(contracts):
 
 def test_resolve_keeps_contract_provider(contracts):
     router = ModelRouter(routing())
-    assert router.resolve(contracts["developer"].model) == [ModelRef(provider="openai", model="model-a")]
-    assert router.resolve(contracts["qa_security"].model) == [ModelRef(provider="anthropic", model="model-b")]
+    assert router.resolve(contracts["developer"].model) == [ModelRef(provider="anthropic", model="model-a")]
+    assert router.resolve(contracts["qa_security"].model) == [ModelRef(provider="gemini", model="model-b")]
 
 
 def test_unpriced_model_refused(contracts):
-    router = ModelRouter(routing(pricing={"anthropic/model-b": PRICE.model_dump()}))
+    router = ModelRouter(routing(pricing={"gemini/model-b": PRICE.model_dump()}))
     with pytest.raises(ModelNotConfiguredError, match="no price"):
         router.resolve(contracts["developer"].model)
 
@@ -136,7 +139,7 @@ def test_independence_holds_and_detects_violation(contracts):
     bad_qa = qa.model_copy(
         update={
             "model": qa.model.model_copy(
-                update={"primary": ModelRef(provider="openai", model="REPLACE_WITH_ROUTING_DEFAULT")}
+                update={"primary": ModelRef(provider="anthropic", model="REPLACE_WITH_ROUTING_DEFAULT")}
             )
         }
     )
@@ -144,17 +147,21 @@ def test_independence_holds_and_detects_violation(contracts):
         check_model_independence({**contracts, "qa_security": bad_qa}, router)
 
 
-def test_factory_requires_env_and_builds_right_class(monkeypatch):
+def test_factory_requires_env_and_builds_right_adapter(monkeypatch):
     cfg = routing()
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    for var in ("OPENAI_API_KEY", "LOCAL_BASE_URL"):
+        monkeypatch.delenv(var, raising=False)
     with pytest.raises(ModelNotConfiguredError, match="OPENAI_API_KEY"):
-        openai_model_factory("openai", cfg.providers["openai"], "model-a")
-    monkeypatch.setenv("OPENAI_API_KEY", "test-not-a-key")
-    monkeypatch.setenv("SECONDARY_PROVIDER_API_KEY", "test-not-a-key")
-    monkeypatch.setenv("SECONDARY_PROVIDER_BASE_URL", "https://compat.example/v1")
-    assert isinstance(openai_model_factory("openai", cfg.providers["openai"], "model-a"), OpenAIResponsesModel)
-    compat = openai_model_factory("anthropic", cfg.providers["anthropic"], "model-b")
-    assert isinstance(compat, OpenAIChatCompletionsModel)
+        http_model_factory("openai", cfg.providers["openai"], "model-a")
+    for var in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "LOCAL_API_KEY"):
+        monkeypatch.setenv(var, "test-not-a-key")
+    with pytest.raises(ModelNotConfiguredError, match="LOCAL_BASE_URL"):
+        http_model_factory("local", cfg.providers["local"], "m")
+    monkeypatch.setenv("LOCAL_BASE_URL", "http://localhost:11434/v1")
+    assert isinstance(http_model_factory("openai", cfg.providers["openai"], "model-a"), OpenAIChatModel)
+    assert isinstance(http_model_factory("anthropic", cfg.providers["anthropic"], "model-b"), AnthropicChatModel)
+    assert isinstance(http_model_factory("gemini", cfg.providers["gemini"], "g"), GeminiChatModel)
+    assert isinstance(http_model_factory("local", cfg.providers["local"], "m"), OpenAIChatModel)
 
 
 # ------------------------------------------------------------------ metered model
@@ -166,8 +173,11 @@ def metered(*models: FakeModel, recorder=None, breakers=None):
     return MeteredModel(cands, recorder=recorder or MemoryRecorder(), ctx=CTX)
 
 
+REQ = ChatRequest(system="s", messages=(UserMessage("hi"),), temperature=0.2)
+
+
 def call(model: MeteredModel):
-    return asyncio.run(model.get_response(None, "hi", None, [], None, [], None))
+    return asyncio.run(model.complete(REQ))
 
 
 def test_records_usage_and_cost():
@@ -193,9 +203,16 @@ def test_falls_back_on_transient_error():
 
 def test_non_transient_error_is_not_masked():
     fallback = FakeModel()
-    with pytest.raises(ValueError):
-        call(metered(FakeModel(ValueError("bad request")), fallback))
+    with pytest.raises(ProviderRequestError):
+        call(metered(FakeModel(ProviderRequestError("p: HTTP 400")), fallback))
     assert fallback.calls == 0
+
+
+def test_temperature_dropped_for_providers_that_reject_it():
+    fake = FakeModel()
+    cand = Candidate(ModelRef(provider="g", model="m"), fake, PRICE, CircuitBreaker(), send_temperature=False)
+    asyncio.run(MeteredModel([cand], recorder=MemoryRecorder(), ctx=CTX).complete(REQ))
+    assert fake.requests[0].temperature is None
 
 
 def test_open_circuit_skips_provider_and_all_down_raises():
@@ -218,30 +235,14 @@ def test_budget_checked_before_calling_provider():
     assert fake.calls == 0
 
 
-def test_streaming_disabled():
-    with pytest.raises(NotImplementedError):
-        metered(FakeModel()).stream_response()
-
-
-# ------------------------------------------------------------------ through the Agents SDK runner
-def test_agents_sdk_run_is_metered(contracts):
-    fake = FakeModel(response("Final answer", rid="run-1"))
+def test_router_pins_run_to_contract_candidates(contracts):
+    fake = FakeModel(response("x", rid="run-1"))
     router = ModelRouter(routing(), model_factory=lambda provider, cfg, name: fake)
     rec = MemoryRecorder()
-    provider = router.provider_for_run(contracts["developer"], CTX, rec)
-    agent = Agent(name="developer", instructions="Be brief.", model=contracts["developer"].model.profile)
-    result = asyncio.run(
-        Runner.run(agent, "hello", run_config=RunConfig(model_provider=provider, tracing_disabled=True))
-    )
-    assert result.final_output == "Final answer"
+    model = router.model_for_run(contracts["developer"], CTX, rec)
+    assert model.refs == [ModelRef(provider="anthropic", model="model-a")]
+    asyncio.run(model.complete(REQ))
     assert [r["request_id"] for r in rec.records] == ["run-1"]
-
-
-def test_run_provider_refuses_other_model_names(contracts):
-    router = ModelRouter(routing(), model_factory=lambda provider, cfg, name: FakeModel())
-    provider = router.provider_for_run(contracts["developer"], CTX, MemoryRecorder())
-    with pytest.raises(ModelNotConfiguredError, match="pinned"):
-        provider.get_model("gpt-something-else")
 
 
 def test_provider_config_defaults():

@@ -1,4 +1,7 @@
-"""ModelRouter: contract model config -> ordered, priced, circuit-protected candidates."""
+"""ModelRouter: contract model config -> ordered, priced, circuit-protected candidates.
+
+A run is pinned to the candidates its contract declares: nothing an agent or a prompt says
+can switch it to another model."""
 
 from __future__ import annotations
 
@@ -6,35 +9,37 @@ import os
 import time
 from collections.abc import Callable
 
-from agents import OpenAIChatCompletionsModel, OpenAIResponsesModel
-from agents.models.interface import Model, ModelProvider
-from openai import AsyncOpenAI
-
 from aieos.contracts.agent_contract import AgentContract, ModelConfig, ModelRef
+from aieos.providers.adapters.anthropic import AnthropicChatModel
+from aieos.providers.adapters.gemini import GeminiChatModel
+from aieos.providers.adapters.openai_chat import OpenAIChatModel
 from aieos.providers.circuit import CircuitBreaker
 from aieos.providers.config import ProviderConfig, RoutingConfig
+from aieos.providers.llm import ChatModel
 from aieos.providers.metering import MeteringContext, UsageRecorder
 from aieos.providers.models import Candidate, MeteredModel
 
-ModelFactory = Callable[[str, ProviderConfig, str], Model]
+ModelFactory = Callable[[str, ProviderConfig, str], ChatModel]
 
 
 class ModelNotConfiguredError(RuntimeError):
     pass
 
 
-def openai_model_factory(provider_name: str, cfg: ProviderConfig, model_name: str) -> Model:
+def http_model_factory(provider_name: str, cfg: ProviderConfig, model_name: str) -> ChatModel:
+    """Build the adapter for a provider's wire protocol. Keys come from the environment only."""
     api_key = os.environ.get(cfg.api_key_env)
     if not api_key:
         raise ModelNotConfiguredError(f"provider {provider_name}: environment variable {cfg.api_key_env} is not set")
     base_url = os.environ.get(cfg.base_url_env) if cfg.base_url_env else None
     if cfg.kind == "openai_compatible" and not base_url:
         raise ModelNotConfiguredError(f"provider {provider_name}: {cfg.base_url_env} is not set")
-    # Retries are ours (fallback + circuit breaker) and Temporal's, not the client's.
-    client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=cfg.timeout_seconds, max_retries=0)
-    if cfg.kind == "openai":
-        return OpenAIResponsesModel(model_name, client)
-    return OpenAIChatCompletionsModel(model_name, client)
+    timeout = cfg.timeout_seconds
+    if cfg.kind == "anthropic":
+        return AnthropicChatModel(model_name, api_key=api_key, base_url=base_url, timeout_seconds=timeout)
+    if cfg.kind == "gemini":
+        return GeminiChatModel(model_name, api_key=api_key, base_url=base_url, timeout_seconds=timeout)
+    return OpenAIChatModel(model_name, api_key=api_key, kind=cfg.kind, base_url=base_url, timeout_seconds=timeout)
 
 
 class ModelRouter:
@@ -42,13 +47,13 @@ class ModelRouter:
         self,
         config: RoutingConfig,
         *,
-        model_factory: ModelFactory = openai_model_factory,
+        model_factory: ModelFactory = http_model_factory,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._config = config
         self._factory = model_factory
         self._clock = clock
-        self._models: dict[tuple[str, str], Model] = {}
+        self._models: dict[tuple[str, str], ChatModel] = {}
         self._breakers: dict[str, CircuitBreaker] = {}
 
     def resolve(self, model_cfg: ModelConfig) -> list[ModelRef]:
@@ -83,7 +88,7 @@ class ModelRouter:
             )
         return self._breakers[provider]
 
-    def _model(self, ref: ModelRef) -> Model:
+    def _model(self, ref: ModelRef) -> ChatModel:
         key = (ref.provider, ref.model)
         if key not in self._models:
             self._models[key] = self._factory(ref.provider, self._config.providers[ref.provider], ref.model)
@@ -94,24 +99,6 @@ class ModelRouter:
         for ref in self.resolve(contract.model):
             price = self._config.price_for(ref)
             assert price is not None  # guaranteed by resolve()
-            candidates.append(Candidate(ref, self._model(ref), price, self.breaker(ref.provider)))
+            send_temperature = self._config.providers[ref.provider].send_temperature
+            candidates.append(Candidate(ref, self._model(ref), price, self.breaker(ref.provider), send_temperature))
         return MeteredModel(candidates, recorder=recorder, ctx=ctx)
-
-    def provider_for_run(
-        self, contract: AgentContract, ctx: MeteringContext, recorder: UsageRecorder
-    ) -> RunModelProvider:
-        return RunModelProvider(self.model_for_run(contract, ctx, recorder), profile=contract.model.profile)
-
-
-class RunModelProvider(ModelProvider):
-    """Agents SDK ModelProvider for one agent run. The model is fixed by the contract:
-    an agent definition or prompt cannot switch to another model by name."""
-
-    def __init__(self, model: MeteredModel, *, profile: str) -> None:
-        self._model = model
-        self._profile = profile
-
-    def get_model(self, model_name: str | None) -> Model:
-        if model_name not in (None, "", self._profile):
-            raise ModelNotConfiguredError(f"model {model_name!r} requested; this run is pinned to {self._profile!r}")
-        return self._model

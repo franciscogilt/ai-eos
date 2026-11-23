@@ -14,7 +14,7 @@ from pathlib import Path
 
 from temporalio.worker import Worker
 
-from aieos.agents.runner import SdkAgentRunner
+from aieos.agents.runner import AgentRunner
 from aieos.artifacts.store import ArtifactStore
 from aieos.core.logging import configure_logging, get_logger
 from aieos.core.settings import (
@@ -56,7 +56,7 @@ async def _run(kind: str, engineering: Path) -> None:
     client = await connect(TemporalSettings())
     if kind == "agents":
         router = ModelRouter(load_routing_config(ModelRoutingSettings().model_routing_path))
-        runner = SdkAgentRunner(
+        runner = AgentRunner(
             db,
             router=router,
             recorder=PostgresUsageRecorder(db),

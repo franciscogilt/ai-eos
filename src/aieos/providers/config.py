@@ -26,11 +26,15 @@ class _Strict(BaseModel):
 
 
 class ProviderConfig(_Strict):
-    # openai: OpenAI Responses API. openai_compatible: Chat Completions at base_url (any vendor or gateway).
-    kind: Literal["openai", "openai_compatible"]
+    # Wire protocol. anthropic: Messages API. gemini: Gemini generateContent. openai: OpenAI Chat
+    # Completions. openai_compatible: the same protocol at base_url (gateways, vLLM, Ollama, ...).
+    kind: Literal["anthropic", "gemini", "openai", "openai_compatible"]
     api_key_env: str = Field(pattern=r"^[A-Z][A-Z0-9_]*$")
+    # Optional for the hosted vendors (overrides their public endpoint); required for openai_compatible.
     base_url_env: str | None = Field(default=None, pattern=r"^[A-Z][A-Z0-9_]*$")
     timeout_seconds: float = Field(default=120.0, gt=0, le=900)
+    # Some reasoning models reject a temperature parameter; set false for those.
+    send_temperature: bool = True
 
     @model_validator(mode="after")
     def _compatible_needs_url(self) -> ProviderConfig:

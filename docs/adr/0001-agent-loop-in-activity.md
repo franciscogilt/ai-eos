@@ -10,7 +10,7 @@ against a Temporal server, and the environment that built B14 cannot download on
 untested.
 
 ## Decision
-One agent step = one `run_agent_step` activity on the agent worker. The Agents SDK `Runner` runs there
+One agent step = one `run_agent_step` activity on the agent worker. The agent loop runs there
 with the metered model. Tools still never run in the agent worker: each tool call is a small
 `ToolCallWorkflow` whose only step is the `execute_tool` activity on the gateway's task queue. The workflow
 id derives from the call's idempotency key, and duplicate ids are rejected, so a call runs at most once.
@@ -21,6 +21,6 @@ id derives from the call's idempotency key, and duplicate ids are rejected, so a
   again, and tool calls get new call ids (new agent run). This is safe for B14 agents, whose tools are
   read-only or write content-addressed artifacts. Before an agent with non-idempotent tools (sandbox
   commands, B15) goes to production, either move to R1 or give those tools step-stable call ids.
-- The SDK runner, factory, grounding and metering are fully tested without Temporal.
-- Revisit: move to the plugin (`temporalio-openai-agents`, GA since March 2026) when CI has covered it.
-  The `AgentRunner` interface, contracts and gateway do not change.
+- The agent loop, factory, grounding and metering are fully tested without Temporal.
+- Revisit: run each model call and tool call of the loop as its own activity (our loop, since ADR-0002
+  replaced the Agents SDK) once CI covers it. The `AgentRunner` interface, contracts and gateway do not change.

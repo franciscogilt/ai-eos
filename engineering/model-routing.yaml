@@ -1,33 +1,46 @@
 # Model routing. Read by aieos.providers.config.load_routing_config.
+# AI-EOS is provider-neutral (ADR-0002): every provider below is reached over plain HTTP by our
+# own adapter; none is required. Agent contracts name a provider slot; this file says how to
+# reach it and which model id it uses for each profile.
+#
 # Nothing routes until each provider/profile has a model id AND that model has a price:
 # prices make budgets enforceable, so unpriced models are refused.
 api_version: aieos/v1
 
 providers:
+  anthropic:
+    kind: anthropic              # Messages API
+    api_key_env: ANTHROPIC_API_KEY
+    timeout_seconds: 180
+  gemini:
+    kind: gemini                 # generateContent
+    api_key_env: GEMINI_API_KEY
+    timeout_seconds: 180
   openai:
-    kind: openai                 # Responses API
+    kind: openai                 # Chat Completions
     api_key_env: OPENAI_API_KEY
     timeout_seconds: 120
-  # Second provider for independent QA/Security review. The slot is named "anthropic" to match the
-  # current qa_security contract; point it at any OpenAI-compatible endpoint (vendor API or gateway).
-  anthropic:
-    kind: openai_compatible      # Chat Completions at SECONDARY_PROVIDER_BASE_URL
-    api_key_env: SECONDARY_PROVIDER_API_KEY
-    base_url_env: SECONDARY_PROVIDER_BASE_URL
-    timeout_seconds: 180
+    # send_temperature: false    # for reasoning models that reject a temperature
+  # Any OpenAI-compatible server (gateway, vLLM, Ollama, LM Studio). Uncomment to use:
+  # local:
+  #   kind: openai_compatible
+  #   api_key_env: LOCAL_LLM_API_KEY
+  #   base_url_env: LOCAL_LLM_BASE_URL   # e.g. http://localhost:11434/v1
 
-# Model id per provider and profile. Contracts choose the provider; this chooses the model id.
-# REPLACE before first use. Example shape:
+# Model id per provider and profile. REPLACE before first use. Example shape:
 models: {}
-#  openai:
+#  anthropic:
 #    reasoning_high: REPLACE_model_id
 #    reasoning_standard: REPLACE_model_id
-#  anthropic:
+#  gemini:
+#    reasoning_high: REPLACE_model_id
+#  openai:
 #    reasoning_high: REPLACE_model_id
 
 # USD per million tokens, copied from each provider's current price list. REPLACE before first use.
+# cache_write_input_per_mtok: set it for providers that bill prompt-cache writes separately (Anthropic).
 pricing: {}
-#  openai/REPLACE_model_id: {input_per_mtok: 0, cached_input_per_mtok: 0, output_per_mtok: 0}
+#  anthropic/REPLACE_model_id: {input_per_mtok: 0, cached_input_per_mtok: 0, output_per_mtok: 0, cache_write_input_per_mtok: 0}
 
 circuit_breaker_failures: 5
 circuit_breaker_reset_seconds: 30

@@ -1,7 +1,7 @@
 api_version: aieos/v1
 key: supervisor
 name: Supervisor Agent
-version: 1.0.0
+version: 1.1.0
 purpose: Coordinate a feature_delivery workflow by choosing the next step from the current state.
 responsibilities:
   - Interpret the user's request and the state of completed steps.
@@ -18,7 +18,7 @@ input_schema: SupervisorInput
 output_schema: SupervisorDecision
 model:
   profile: reasoning_standard
-  primary: {provider: openai, model: REPLACE_WITH_ROUTING_DEFAULT}
+  primary: {provider: anthropic, model: REPLACE_WITH_ROUTING_DEFAULT}
   temperature: 0.0
   max_output_tokens: 2000
 tools:

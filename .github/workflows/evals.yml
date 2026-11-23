@@ -27,9 +27,9 @@ jobs:
           uv run aieos-eval --agent requirements --cases engineering/evals/requirements
           --max-usd "${{ inputs.max_usd }}" --report eval-requirements.json
         env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          SECONDARY_PROVIDER_API_KEY: ${{ secrets.SECONDARY_PROVIDER_API_KEY }}
-          SECONDARY_PROVIDER_BASE_URL: ${{ vars.SECONDARY_PROVIDER_BASE_URL }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:

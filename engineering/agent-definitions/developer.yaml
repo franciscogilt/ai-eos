@@ -1,7 +1,7 @@
 api_version: aieos/v1
 key: developer
 name: Developer Agent
-version: 1.0.0
+version: 1.1.0
 purpose: Implement one planned task in an isolated sandbox and return a tested patch.
 responsibilities:
   - Implement only the assigned task, following project coding standards.
@@ -17,7 +17,7 @@ input_schema: DeveloperTaskInput
 output_schema: DeveloperResult
 model:
   profile: reasoning_high
-  primary: {provider: openai, model: REPLACE_WITH_ROUTING_DEFAULT}
+  primary: {provider: anthropic, model: REPLACE_WITH_ROUTING_DEFAULT}
   temperature: 0.1
   max_output_tokens: 16000
 tools:

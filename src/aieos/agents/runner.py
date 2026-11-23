@@ -1,9 +1,9 @@
-"""SdkAgentRunner: executes one agent step for the orchestrator (`run_agent_step` activity).
+"""AgentRunner: executes one agent step for the orchestrator (`run_agent_step` activity).
 
 For the run it is given:
   1. Load the run's published agent version and verify that the deployed contract and
      prompt are byte-identical to it (by SHA-256). A drifted deployment is refused.
-  2. Build a pinned, metered model provider (workflow and per-run budgets).
+  2. Build the run's pinned, metered model (workflow and per-run budgets, provider fallback).
   3. Build the agent with gateway-backed tools, run it with grounding retries.
   4. Store the output as an artifact through the gateway; return a compact step result.
 
@@ -23,9 +23,10 @@ from uuid import UUID
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import text
 
-from aieos.agents.errors import AgentNotAvailableError, ContractViolationError
+from aieos.agents.errors import AgentNotAvailableError, ContractViolationError, ModelRequestRejectedError
 from aieos.agents.factory import RunScope, ToolInvoker, build_agent, run_with_retries
 from aieos.agents.grounding import architecture_violations, requirement_grounding_violations
+from aieos.agents.loop import AgentDefinition
 from aieos.agents.registry import LoadedContract, load_all
 from aieos.agents.untrusted import wrap_untrusted
 from aieos.contracts.io import ArchitectureDesign, RequirementsInput, RequirementsSpec
@@ -34,6 +35,7 @@ from aieos.contracts.tools import ToolRequest
 from aieos.core.logging import get_logger
 from aieos.gateway.catalog import ToolCatalog, load_catalog
 from aieos.persistence.db import Database
+from aieos.providers.llm import ProviderRequestError
 from aieos.providers.metering import MeteringContext, UsageRecorder
 from aieos.providers.router import ModelNotConfiguredError, ModelRouter
 
@@ -118,7 +120,7 @@ PREPARERS: dict[str, Callable[[dict[str, Any], RunScope], Prepared]] = {
 }
 
 
-class SdkAgentRunner:
+class AgentRunner:
     def __init__(
         self,
         db: Database,
@@ -179,7 +181,7 @@ class SdkAgentRunner:
             run_max_tokens=contract.limits.max_total_tokens,
         )
         try:
-            provider = self._router.provider_for_run(contract, ctx, self._recorder)
+            model = self._router.model_for_run(contract, ctx, self._recorder)
         except ModelNotConfiguredError as exc:
             raise AgentNotAvailableError(f"{contract.key}: {exc}") from None
 
@@ -191,7 +193,7 @@ class SdkAgentRunner:
         )
         prepared = prepare(request.inputs, scope)
 
-        def make_agent(attempt: int) -> Any:
+        def make_agent(attempt: int) -> AgentDefinition:
             scope.attempt = attempt
             scope.repository_paths_read.clear()  # grounding counts only files read in the accepted attempt
             return build_agent(
@@ -201,16 +203,19 @@ class SdkAgentRunner:
         retries = (
             contract.failure_handling.max_retries if "schema_violation" in contract.failure_handling.retry_on else 0
         )
-        output, attempts = await run_with_retries(
-            make_agent,
-            prepared.message,
-            provider=provider,
-            output_type=prepared.output_type,
-            validate=prepared.validate,
-            max_turns=contract.limits.max_turns,
-            timeout_seconds=contract.limits.timeout_seconds,
-            max_retries=retries,
-        )
+        try:
+            output, attempts = await run_with_retries(
+                make_agent,
+                prepared.message,
+                model=model,
+                output_type=prepared.output_type,
+                validate=prepared.validate,
+                max_turns=contract.limits.max_turns,
+                timeout_seconds=contract.limits.timeout_seconds,
+                max_retries=retries,
+            )
+        except ProviderRequestError as exc:
+            raise ModelRequestRejectedError(str(exc)) from None
 
         payload = prepared.to_output(output)
         artifact_ids: list[UUID] = []
