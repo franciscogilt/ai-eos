@@ -29,6 +29,10 @@ from tests.unit.test_providers import routing
 BUCKET = "resume-test"
 
 
+# seed_workflow creates an unrelated run of its own; only the step's runs matter here.
+STEP_RUNS = "SELECT {cols} FROM agent_runs WHERE workflow_id = %s AND step_key = 'requirements'"
+
+
 class WorkerDied(RuntimeError):
     pass
 
@@ -87,7 +91,7 @@ def test_crashed_step_resumes_in_the_same_run(provisioned_db, org):
     first = FakeModel(function_call("artifacts.read", {"artifact_id": missing}), WorkerDied("worker lost"))
     with pytest.raises(WorkerDied):
         attempt_step(provisioned_db, org, wf, first)
-    runs = sql(provisioned_db, "SELECT id, status FROM agent_runs WHERE workflow_id = %s", (wf,))
+    runs = sql(provisioned_db, STEP_RUNS.replace("{cols}", "id, status"), (wf,))
     assert len(runs) == 1 and runs[0][1] == "failed"
     run_id = runs[0][0]
 
@@ -95,7 +99,7 @@ def test_crashed_step_resumes_in_the_same_run(provisioned_db, org):
     result = attempt_step(provisioned_db, org, wf, second)
     assert result.agent_run_id == run_id and result.status == "completed"  # the same run, resumed
     assert second.calls == 1  # only the answer; the earlier turn was not re-requested
-    assert sql(provisioned_db, "SELECT status FROM agent_runs WHERE workflow_id = %s", (wf,)) == [("succeeded",)]
+    assert sql(provisioned_db, STEP_RUNS.replace("{cols}", "status"), (wf,)) == [("succeeded",)]
     executions = sql(
         provisioned_db,
         "SELECT idempotency_key FROM tool_executions WHERE agent_run_id = %s AND tool_name = 'artifacts.read'",
@@ -115,7 +119,7 @@ def test_checkpoints_are_tenant_isolated(provisioned_db, org):
     )
     wf = seed_workflow(provisioned_db.owner_conninfo, org)["workflow"]
     attempt_step(provisioned_db, org, wf, FakeModel(json_output(spec_payload())))
-    run_id = sql(provisioned_db, "SELECT id FROM agent_runs WHERE workflow_id = %s", (wf,))[0][0]
+    run_id = sql(provisioned_db, STEP_RUNS.replace("{cols}", "id"), (wf,))[0][0]
 
     async def peek():
         db = Database(provisioned_db.app_async_url, pool_size=1, max_overflow=0)
