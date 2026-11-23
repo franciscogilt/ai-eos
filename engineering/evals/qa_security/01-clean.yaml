@@ -1,0 +1,37 @@
+id: clean-patch
+agent: qa_security
+context:
+  developer_summary: Added GET /reports/{id}.csv reusing can_view_report; tests for allowed and forbidden users.
+  patch: |
+    diff --git a/app/reports.py b/app/reports.py
+    --- a/app/reports.py
+    +++ b/app/reports.py
+    @@ -1,3 +1,4 @@
+    +import csv, io
+     from app.auth import can_view_report
+     from app.db import get_report, report_rows
+    @@ -12,0 +14,14 @@ def report(request, report_id):
+    +def report_csv(request, report_id):
+    +    report = get_report(report_id)
+    +    if report is None or not can_view_report(request.user, report):
+    +        return Response(status=403)
+    +    out = io.StringIO()
+    +    writer = csv.writer(out)
+    +    writer.writerow(report.columns)
+    +    for row in report_rows(report):
+    +        writer.writerow(row)
+    +    return Response(out.getvalue(), content_type="text/csv")
+    diff --git a/tests/test_reports.py b/tests/test_reports.py
+    --- a/tests/test_reports.py
+    +++ b/tests/test_reports.py
+    @@ -20,0 +21,10 @@
+    +def test_csv_has_header(client, viewer, report):
+    +    r = client.get(f"/reports/{report.id}.csv", user=viewer)
+    +    assert r.status == 200 and r.text.splitlines()[0] == ",".join(report.columns)
+    +
+    +def test_csv_forbidden(client, stranger, report):
+    +    r = client.get(f"/reports/{report.id}.csv", user=stranger)
+    +    assert r.status == 403 and r.text == ""
+expect:
+  verdict: approve
+  criteria: {AC-1: met, AC-2: met}

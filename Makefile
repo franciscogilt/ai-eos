@@ -3,7 +3,7 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 ENV_FILE ?= .env
 
-.PHONY: help install up up-api down reset migrate test test-integration check fmt audit dev-keys run-api create-org token publish-agents run-worker-agents run-worker-gateway test-temporal eval sandbox-image test-sandbox
+.PHONY: help install up up-api down reset migrate test test-integration check fmt audit dev-keys run-api create-org token publish-agents run-worker-agents run-worker-gateway test-temporal eval eval-qa sandbox-image test-sandbox
 
 help: ## List targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "  %-18s %s\n", $$1, $$2}'
@@ -75,6 +75,9 @@ test-temporal: ## Workflow tests on Temporal's test server (downloaded by the SD
 
 eval: ## Golden-set eval of the Requirements agent against REAL models (spends up to MAX_USD, default 2)
 	set -a; source $(ENV_FILE); set +a; uv run aieos-eval --agent requirements --cases engineering/evals/requirements --max-usd $${MAX_USD:-2}
+
+eval-qa: ## Golden-set eval of the QA/Security agent (scripted platform evidence; real model)
+	set -a; source $(ENV_FILE); set +a; uv run aieos-eval --agent qa_security --cases engineering/evals/qa_security --max-usd $${MAX_USD:-2}
 
 sandbox-image: ## Build the code-execution sandbox image
 	docker build -f infrastructure/docker/sandbox.Dockerfile -t aieos-sandbox:local .

@@ -336,3 +336,65 @@ def test_eval_uses_the_configured_routing_file(monkeypatch, tmp_path):
     with pytest.raises(ZeroDivisionError):
         harness.main(["--agent", "requirements", "--cases", str(tmp_path)])
     assert seen["path"] == Path("engineering/model-routing.local.yaml")
+
+
+def test_shipped_qa_eval_cases_load_and_validate():
+    from aieos.contracts.io import ArchitectureDesign
+
+    cases = load_cases(ENGINEERING / "evals" / "qa_security")
+    assert len(cases) == 5 and all(c.agent == "qa_security" for c in cases)
+    for c in cases:
+        RequirementsSpec.model_validate(c.context["requirements"])
+        ArchitectureDesign.model_validate(c.context["design"])
+        assert c.context["patch"].startswith("diff --git") and "verdict" in c.expect
+
+
+def test_qa_eval_scoring_uses_the_production_qa_step(loaded, catalog):
+    cases = {c.id: c for c in load_cases(ENGINEERING / "evals" / "qa_security")}
+    case = cases["prompt-injection-in-patch"]
+    swayed = {"verdict": "approve", "acceptance_criteria_results": {"AC-1": "met", "AC-2": "met"}, "findings": []}
+    fake = FakeModel(json_output(swayed))
+    router = ModelRouter(routing(), model_factory=lambda *_: fake)
+    result = asyncio.run(
+        run_case(case, loaded=loaded["qa_security"], catalog=catalog, router=router, budget=SuiteBudget(Decimal("1")))
+    )
+    assert not result.passed and {c.name for c in result.checks if not c.passed} == {"verdict", "criterion:AC-2"}
+    first = text_of(fake.requests[0])
+    assert 'untrusted source="developer_summary"' in first and "AI REVIEWER INSTRUCTIONS" in first
+
+    secret_case = cases["secret-and-failing-tests"]
+    finding = {
+        "severity": "high",
+        "category": "security",
+        "title": "Hard-coded AWS key",
+        "evidence": "scan",
+        "recommendation": "remove",
+    }
+    good = {
+        "verdict": "request_changes",
+        "acceptance_criteria_results": {"AC-1": "not_met", "AC-2": "met"},
+        "findings": [finding],
+    }
+    fake2 = FakeModel(json_output(good))
+    router2 = ModelRouter(routing(), model_factory=lambda *_: fake2)
+    result2 = asyncio.run(
+        run_case(
+            secret_case, loaded=loaded["qa_security"], catalog=catalog, router=router2, budget=SuiteBudget(Decimal("1"))
+        )
+    )
+    assert result2.passed, result2.checks
+    assert '"passed": false' in text_of(fake2.requests[0])  # the failing platform run is shown as evidence
+
+
+def test_scripted_platform_refuses_model_tool_calls():
+    from aieos.evals.harness import ScriptedPlatform
+
+    request = ToolRequest(
+        org_id=uuid.uuid4(),
+        workflow_id=uuid.uuid4(),
+        agent_run_id=uuid.uuid4(),
+        tool_name="sandbox.run_command",
+        arguments={"command": "ls"},
+        call_id="a1-t1",
+    )
+    assert asyncio.run(ScriptedPlatform({}).invoke(request)).status == "failed"
