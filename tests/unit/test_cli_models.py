@@ -163,6 +163,44 @@ def test_codex_headless_read_only():
     assert resp.message.tool_calls and resp.usage.output_tokens == 10
 
 
+def test_antigravity_headless_over_stdin():
+    events = "\n".join(
+        [
+            json.dumps({"event": "assistant", "text": "thinking..."}),
+            json.dumps(
+                {
+                    "response": REPLY,
+                    "status": "SUCCESS",
+                    "conversation_id": "c-1",
+                    "usage": {"input_tokens": 30, "output_tokens": 4, "thinking_tokens": 6, "cache_read_tokens": 12},
+                }
+            ),
+        ]
+    )
+    script = Script(events)
+    resp = complete(CliChatModel("antigravity_cli", "default", runner=script, timeout_seconds=600))
+    argv, stdin = script.calls[0]["argv"], script.calls[0]["stdin"]
+    assert argv[0] == "agy" and "-p" not in argv  # the conversation never goes on the command line
+    assert argv[argv.index("--input-format") + 1] == argv[argv.index("--output-format") + 1] == "stream-json"
+    assert "--sandbox" in argv and argv[argv.index("--mode") + 1] == "plan" and "600s" in argv
+    event = json.loads(stdin)
+    assert event["event"] == "user" and event["message"]["content"].startswith("You are the Developer.")
+    assert resp.message.tool_calls and resp.request_id == "c-1"
+    assert (resp.usage.input_tokens, resp.usage.cached_input_tokens, resp.usage.output_tokens) == (30, 12, 10)
+
+
+@pytest.mark.parametrize(
+    ("stdout", "error", "match"),
+    [
+        ("", ProviderTransientError, "no response"),  # agy versions that print nothing without a terminal
+        (json.dumps({"status": "ERROR", "error": "unknown model"}), ProviderRequestError, "unknown model"),
+    ],
+)
+def test_antigravity_failures(stdout, error, match):
+    with pytest.raises(error, match=match):
+        complete(CliChatModel("antigravity_cli", "x", runner=Script(stdout)))
+
+
 def test_missing_usage_is_estimated_so_budgets_still_apply():
     resp = complete(CliChatModel("gemini_cli", "default", runner=Script(json.dumps({"response": REPLY}))))
     assert resp.usage.input_tokens > 0 and resp.usage.output_tokens > 0
@@ -247,6 +285,8 @@ def test_local_routing_file_routes_every_agent_for_free(definitions_dir, prompts
             assert cfg.price_for(ref).output_per_mtok == 0
     check_model_independence(contracts, router)  # QA still reviews with a different model family
     assert router.resolve(contracts["qa_security"].model)[0].provider == "gemini"
+    assert cfg.providers["gemini"].cli == "antigravity_cli"  # Gemini CLI no longer serves Google AI Pro
+    assert cfg.providers["anthropic"].cli == "claude_code"
 
 
 def test_cli_factory_needs_the_binary(monkeypatch):

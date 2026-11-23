@@ -1,6 +1,8 @@
 """Coding CLIs already signed in on this machine, used as plain text models (no API key, no API bill).
 
-Supported: Claude Code (`claude -p`), Gemini CLI (`gemini -p`), Codex (`codex exec`). Each call:
+Supported: Claude Code (`claude -p`), Antigravity CLI (`agy`, Google AI Pro/Ultra since Gemini CLI
+stopped serving those plans on 2026-06-18), Gemini CLI (`gemini -p`, still usable with a paid Gemini
+API key) and Codex (`codex exec`). Each call:
 * runs the CLI headless, once, with the rendered conversation on stdin (`text_protocol`), and turns
   its reply back into tool calls. The CLI never acts on its own: AI-EOS's agent loop and tool gateway
   stay in charge, exactly as with the HTTP adapters;
@@ -8,7 +10,9 @@ Supported: Claude Code (`claude -p`), Gemini CLI (`gemini -p`), Codex (`codex ex
 * gets a reduced environment (what the CLIs need to find their sign-in, nothing else), so database
   URLs, the GitHub App key path and other worker settings are not visible to it;
 * asks the CLI to disable its own tools where it supports that (Claude Code `--tools ""`; Codex runs
-  in its read-only sandbox). `extra_args` in model-routing.yaml adds flags your CLI version needs.
+  in its read-only sandbox; Antigravity has no such flag, so it runs with `--sandbox` in plan mode,
+  where headless tool actions are denied by policy). `extra_args` in model-routing.yaml adds
+  flags your CLI version needs.
 
 Model id `default` leaves the model choice to the CLI's own configuration.
 Use within the terms of the plan each CLI is signed in with.
@@ -34,7 +38,7 @@ from aieos.providers.adapters.text_protocol import (
 from aieos.providers.llm import ChatRequest, ChatResponse, ProviderRequestError, ProviderTransientError
 from aieos.providers.pricing import TokenUsage
 
-DEFAULT_COMMANDS = {"claude_code": "claude", "gemini_cli": "gemini", "codex_cli": "codex"}
+DEFAULT_COMMANDS = {"claude_code": "claude", "gemini_cli": "gemini", "codex_cli": "codex", "antigravity_cli": "agy"}
 _ENV_KEEP_EXACT = {
     "HOME",
     "PATH",
@@ -140,6 +144,22 @@ class CliChatModel:
             # No system-prompt flag: the instructions lead the stdin text; -p adds the final nudge.
             argv = [self._command, "--output-format", "json", "-p", "Reply now, following the instructions above."]
             argv += ["-m", self._model] if model else []
+        elif self._cli == "antigravity_cli":
+            # Prompt over stdin needs stream-json in and out (documented); -p would put the whole
+            # conversation on the command line, which Windows limits to about 32,000 characters.
+            argv = [
+                self._command,
+                "--input-format",
+                "stream-json",
+                "--output-format",
+                "stream-json",
+                "--sandbox",
+                "--mode",
+                "plan",
+                "--print-timeout",
+                f"{int(self._timeout)}s",
+            ]
+            argv += ["--model", self._model] if model else []
         else:
             argv = [
                 self._command,
@@ -160,6 +180,9 @@ class CliChatModel:
         conversation = render_conversation(request)
         if self._cli == "claude_code":
             return conversation  # the system prompt goes through --system-prompt
+        if self._cli == "antigravity_cli":
+            event = {"event": "user", "message": {"content": f"{system}\n\n{conversation}"}}
+            return json.dumps(event, ensure_ascii=False) + "\n"
         return f"{system}\n\n{conversation}"
 
     def _parse(self, out: Completed, workdir: str, prompt_text: str) -> tuple[str, TokenUsage, str | None]:
@@ -187,6 +210,8 @@ class CliChatModel:
             if not inp:
                 inp, out_t = _int(stats.get("inputTokens")), _int(stats.get("outputTokens"))
             return text, self._usage(inp, cached, out_t, prompt_text, text), None
+        if self._cli == "antigravity_cli":
+            return self._parse_antigravity(stdout, prompt_text)
         # codex: JSON Lines events on stdout, final message in the -o file.
         inp, cached, out_t = 0, 0, 0
         for line in stdout.splitlines():
@@ -204,6 +229,40 @@ class CliChatModel:
         last = Path(workdir) / "last-message.txt"
         text = last.read_text(encoding="utf-8", errors="replace") if last.exists() else ""
         return text, self._usage(inp, cached, out_t, prompt_text, text), None
+
+    def _parse_antigravity(self, stdout: str, prompt_text: str) -> tuple[str, TokenUsage, str | None]:
+        """stream-json events. The final envelope carries `response`, `status`, `error` and `usage`
+        (documented for --output-format json); text deltas are used only if no envelope arrives."""
+        final: dict[str, Any] | None = None
+        pieces: list[str] = []
+        for line in stdout.splitlines():
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            if "response" in event or "status" in event:
+                final = event
+            elif isinstance(event.get("text"), str):
+                pieces.append(event["text"])
+            elif isinstance((event.get("message") or {}).get("content"), str) and event.get("event") != "user":
+                pieces.append(event["message"]["content"])
+        if final is not None and final.get("status") not in (None, "SUCCESS"):
+            raise ProviderRequestError(f"agy: {final.get('status')}: {str(final.get('error'))[:300]}")
+        text = str(final.get("response") or "") if final else "".join(pieces)
+        if not text.strip():
+            # agy versions with the non-TTY output bug exit 0 with nothing on stdout.
+            raise ProviderTransientError(
+                "agy: no response on stdout (update agy; older versions print nothing without a terminal)"
+            )
+        u = (final or {}).get("usage") or {}
+        inp, out_t = _int(u.get("input_tokens")), _int(u.get("output_tokens")) + _int(u.get("thinking_tokens"))
+        return (
+            text,
+            self._usage(inp, _int(u.get("cache_read_tokens")), out_t, prompt_text, text),
+            (final or {}).get("conversation_id"),
+        )
 
     @staticmethod
     def _usage(inp: int, cached: int, out: int, prompt_text: str, reply: str) -> TokenUsage:

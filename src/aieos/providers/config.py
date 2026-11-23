@@ -28,7 +28,7 @@ class _Strict(BaseModel):
 class ProviderConfig(_Strict):
     # Wire protocol. anthropic: Messages API. gemini: Gemini generateContent. openai: OpenAI Chat
     # Completions. openai_compatible: the same protocol at base_url (gateways, vLLM, Ollama, ...).
-    # cli: a coding CLI already signed in on this machine (Claude Code, Gemini CLI, Codex), used
+    # cli: a coding CLI already signed in on this machine (Claude Code, Antigravity, Gemini CLI, Codex), used
     # as a plain text model; see adapters/cli.py.
     kind: Literal["anthropic", "gemini", "openai", "openai_compatible", "cli"]
     # Required for the hosted APIs; optional for openai_compatible (Ollama needs none); unused for cli.
@@ -39,7 +39,7 @@ class ProviderConfig(_Strict):
     # Some reasoning models reject a temperature parameter; set false for those.
     send_temperature: bool = True
     # kind: cli only.
-    cli: Literal["claude_code", "gemini_cli", "codex_cli"] | None = None
+    cli: Literal["claude_code", "gemini_cli", "codex_cli", "antigravity_cli"] | None = None
     command: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_./~-]+$")  # binary; default: the CLI's name
     extra_args: tuple[str, ...] = ()  # appended to the CLI's arguments, for flags your version needs
 
