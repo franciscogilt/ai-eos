@@ -99,3 +99,46 @@ class ChatResponse:
 
 class ChatModel(Protocol):
     async def complete(self, request: ChatRequest) -> ChatResponse: ...
+
+
+# ------------------------------------------------------------------ checkpoint serialization
+def message_to_dict(m: Message) -> dict[str, Any]:
+    if isinstance(m, UserMessage):
+        return {"role": "user", "text": m.text}
+    if isinstance(m, AssistantMessage):
+        return {
+            "role": "assistant",
+            "text": m.text,
+            "provider": m.provider,
+            "provider_data": m.provider_data,
+            "tool_calls": [
+                {"id": c.id, "name": c.name, "arguments": c.arguments, "arguments_error": c.arguments_error}
+                for c in m.tool_calls
+            ],
+        }
+    return {
+        "role": "tool",
+        "results": [
+            {"call_id": r.call_id, "name": r.name, "content": r.content, "is_error": r.is_error} for r in m.results
+        ],
+    }
+
+
+def message_from_dict(d: dict[str, Any]) -> Message:
+    role = d.get("role")
+    if role == "user":
+        return UserMessage(str(d["text"]))
+    if role == "assistant":
+        calls = tuple(
+            ToolCall(str(c["id"]), str(c["name"]), dict(c.get("arguments") or {}), c.get("arguments_error"))
+            for c in d.get("tool_calls", [])
+        )
+        return AssistantMessage(str(d.get("text", "")), calls, d.get("provider"), dict(d.get("provider_data") or {}))
+    if role == "tool":
+        return ToolResultsMessage(
+            tuple(
+                ToolResultItem(str(r["call_id"]), str(r["name"]), str(r["content"]), bool(r.get("is_error")))
+                for r in d.get("results", [])
+            )
+        )
+    raise ValueError(f"unknown message role {role!r}")

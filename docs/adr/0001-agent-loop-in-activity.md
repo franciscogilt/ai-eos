@@ -24,3 +24,22 @@ id derives from the call's idempotency key, and duplicate ids are rejected, so a
 - The agent loop, factory, grounding and metering are fully tested without Temporal.
 - Revisit: run each model call and tool call of the loop as its own activity (our loop, since ADR-0002
   replaced the Agents SDK) once CI covers it. The `AgentRunner` interface, contracts and gateway do not change.
+
+## Update (2026-11-23): resumable steps
+The step still runs in one activity, but it no longer starts over after a crash (migration 0006):
+- **One run per step attempt.** There is one agent run per (workflow, step, attempt). A retried activity
+  reuses that run, so it keeps its id, its sandbox and its tool-call ids.
+- **Checkpoints.** After every model reply (before its tools run) and after every set of tool results, the
+  runner saves the attempt, its feedback, the conversation and the tool-call counter to
+  `agent_run_checkpoints` (RLS-scoped).
+- **Resuming.**
+  - A retry continues from that state, so no model call is repeated.
+  - A reply whose tools had not run yet runs them, with the same call ids; the gateway returns
+    recorded results for calls that already finished.
+  - Platform checks (tests, exports, scans) use call ids that are stable for the attempt, so they
+    dedupe the same way.
+  - A step that had already finished returns its recorded result.
+- **Remaining gap.** A model reply that arrived but was not yet saved is requested again, once.
+
+Moving each call into its own activity is no longer needed for correctness. It would add only finer
+Temporal visibility.

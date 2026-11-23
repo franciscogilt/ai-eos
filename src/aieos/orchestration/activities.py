@@ -158,8 +158,31 @@ class OrchestrationActivities:
                 )
 
     # ------------------------------------------------------------------ agents
-    async def _create_run(self, org_id: UUID, workflow_id: UUID, agent_key: str) -> UUID:
+    async def _create_run(
+        self, org_id: UUID, workflow_id: UUID, agent_key: str, step_key: str | None = None, attempt: int | None = None
+    ) -> UUID:
+        """One agent run per (workflow, step, attempt). A retried activity reuses it, so the runner resumes
+        from its checkpoint, in the same sandbox, with the same tool-call ids."""
         async with self._db.tenant(org_id) as conn:
+            if step_key is not None:
+                existing = (
+                    await conn.execute(
+                        text(
+                            """SELECT id FROM agent_runs
+                               WHERE workflow_id = :wf AND step_key = :step AND step_attempt = :attempt"""
+                        ),
+                        {"wf": workflow_id, "step": step_key, "attempt": attempt},
+                    )
+                ).scalar_one_or_none()
+                if existing is not None:
+                    await conn.execute(
+                        text(
+                            """UPDATE agent_runs SET status = 'running', finished_at = NULL, error = NULL
+                               WHERE id = :id"""
+                        ),
+                        {"id": existing},
+                    )
+                    return UUID(str(existing))
             version = (
                 await conn.execute(
                     text(
@@ -179,8 +202,8 @@ class OrchestrationActivities:
             await conn.execute(
                 text(
                     """INSERT INTO agent_runs (id, org_id, workflow_id, agent_version_id, model_provider, model_name,
-                                           status)
-                   VALUES (:id, :org, :wf, :v, :provider, :model, 'running')"""
+                                           status, step_key, step_attempt)
+                   VALUES (:id, :org, :wf, :v, :provider, :model, 'running', :step, :attempt)"""
                 ),
                 {
                     "id": run_id,
@@ -189,6 +212,8 @@ class OrchestrationActivities:
                     "v": version.id,
                     "provider": primary["provider"],
                     "model": primary["model"],
+                    "step": step_key,
+                    "attempt": attempt if step_key is not None else None,
                 },
             )
         return run_id
@@ -205,7 +230,9 @@ class OrchestrationActivities:
 
     @activity.defn(name="run_agent_step")
     async def run_agent_step(self, request: AgentStepRequest) -> AgentStepResult:
-        run_id = await self._create_run(request.org_id, request.workflow_id, request.agent_key)
+        run_id = await self._create_run(
+            request.org_id, request.workflow_id, request.agent_key, request.step_key, request.attempt
+        )
         try:
             result = await self._runner.run(request, agent_run_id=run_id)
         except BudgetExceededError as exc:

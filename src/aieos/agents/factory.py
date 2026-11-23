@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 from uuid import UUID
@@ -26,7 +26,7 @@ from aieos.contracts.tools import ToolRequest, ToolResult
 from aieos.core.logging import get_logger
 from aieos.gateway.catalog import ToolCatalog
 from aieos.gateway.tool_schemas import TOOL_ARG_SCHEMAS
-from aieos.providers.llm import ChatModel, ToolSpec
+from aieos.providers.llm import ChatModel, Message, ToolSpec, message_from_dict, message_to_dict
 
 log = get_logger(__name__)
 
@@ -129,6 +129,34 @@ def build_agent(
 Validator = Callable[[Any], Any]  # -> list[str], or an awaitable of it (platform checks)
 
 
+SaveState = Callable[[dict[str, Any]], Awaitable[None]]
+
+
+def scope_state(scope: RunScope) -> dict[str, Any]:
+    return {"tool_calls": scope.tool_calls, "repository_paths_read": sorted(scope.repository_paths_read)}
+
+
+def restore_scope(scope: RunScope, state: dict[str, Any]) -> None:
+    scope.tool_calls = int(state.get("tool_calls", 0))
+    scope.repository_paths_read = set(state.get("repository_paths_read", []))
+
+
+def _checkpointer(
+    save: SaveState, attempt: int, feedback: list[str], scope: RunScope | None
+) -> Callable[[list[Message]], Awaitable[None]]:
+    async def checkpoint(messages: list[Message]) -> None:
+        await save(
+            {
+                "attempt": attempt,
+                "feedback": feedback,
+                "messages": [message_to_dict(m) for m in messages],
+                "scope": scope_state(scope) if scope is not None else {},
+            }
+        )
+
+    return checkpoint
+
+
 async def run_with_retries(
     make_agent: Callable[[int], AgentDefinition],
     message: str,
@@ -139,15 +167,21 @@ async def run_with_retries(
     max_turns: int,
     timeout_seconds: float,
     max_retries: int,
+    scope: RunScope | None = None,
+    resume: dict[str, Any] | None = None,
+    save: SaveState | None = None,
 ) -> tuple[Any, int]:
     """Run the agent; on ungrounded output, run again with the reasons appended.
 
     Schema mistakes are corrected inside a run (see `loop`); a retry here starts a fresh
     conversation, so a rejected answer cannot anchor the next one.
+    With `save`, the state (attempt, feedback, conversation, tool-call counter) is saved after every
+    model reply and tool result; `resume` continues from such a state after a crash.
     Returns (output, attempts). Raises AgentOutputRejectedError or AgentLimitError.
     """
-    feedback: list[str] = []
-    for attempt in range(1, max_retries + 2):
+    feedback: list[str] = list((resume or {}).get("feedback") or [])
+    first = int((resume or {}).get("attempt") or 1)
+    for attempt in range(first, max_retries + 2):
         prompt = message
         if feedback:
             prompt += (
@@ -155,9 +189,19 @@ async def run_with_retries(
                 "sources to satisfy the check:\n" + "\n".join(f"- {f}" for f in feedback[:20])
             )
         agent = make_agent(attempt)
+        history: list[Message] | None = None
+        if resume is not None and attempt == first and resume.get("messages"):
+            history = [message_from_dict(m) for m in resume["messages"]]
+            if scope is not None:
+                restore_scope(scope, resume.get("scope") or {})
+            log.info("agent.resumed", agent=agent.name, attempt=attempt, messages=len(history))
+
+        checkpoint = _checkpointer(save, attempt, list(feedback), scope) if save is not None else None
+
         try:
             output = await asyncio.wait_for(
-                run_agent(agent, prompt, model=model, max_turns=max_turns), timeout=timeout_seconds
+                run_agent(agent, prompt, model=model, max_turns=max_turns, history=history, checkpoint=checkpoint),
+                timeout=timeout_seconds,
             )
         except TimeoutError:
             raise AgentLimitError(f"{agent.name} exceeded {timeout_seconds:.0f}s") from None
@@ -169,4 +213,7 @@ async def run_with_retries(
         if not feedback:
             return output, attempt
         log.warning("agent.grounding_violation", agent=agent.name, attempt=attempt, violations=len(feedback))
+        if save is not None and attempt < max_retries + 1:
+            # The next attempt starts a fresh conversation; record that so a crash resumes it, not this one.
+            await save({"attempt": attempt + 1, "feedback": feedback, "messages": None, "scope": {}})
     raise AgentOutputRejectedError(f"output rejected after {max_retries + 1} attempts: {'; '.join(feedback[:5])}")
