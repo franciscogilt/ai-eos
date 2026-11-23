@@ -15,6 +15,7 @@ import pytest
 
 from aieos.gateway.handlers import ToolInputError
 from aieos.gateway.sandbox_handlers import DEFAULT_ALLOWED_COMMANDS, _argv, sandbox_handlers
+from aieos.sandbox.base import _tar
 from aieos.sandbox.docker import (
     SAFE_DIFF,
     Completed,
@@ -23,7 +24,6 @@ from aieos.sandbox.docker import (
     SandboxKey,
     SandboxLimits,
     UnsafePathError,
-    _tar,
     safe_relative_path,
 )
 
@@ -103,7 +103,7 @@ def test_ensure_creates_once_and_initialises_git():
     verbs = [c[0][0] for c in cli.calls]
     assert verbs.count("run") == 1
     execs = [c[0] for c in cli.calls if c[0][0] == "exec"]
-    assert execs[0][-6:] == ["tar", "-x", "--no-same-owner", "--no-same-permissions", "-C", "/workspace"]
+    assert execs[0][-6:] == ["tar", "-x", "--no-same-owner", "--no-same-permissions", "-C", "."]
     assert [e[e.index("timeout") + 3 :][:2] for e in execs[1:]] == [["git", "init"], ["git", "add"], ["git", "-c"]]
 
 
@@ -201,3 +201,11 @@ def test_run_tests_reports_pass_fail():
     argv = cli.calls[-1][0]
     start = argv.index("python")
     assert argv[start:] == ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests/test_x.py", "-k", "export"]
+
+
+def test_tar_entries_carry_the_current_time():
+    """Regression: with mtime 0, git missed same-size rewrites of a file in the exported patch."""
+    import time as _time
+
+    with tarfile.open(fileobj=io.BytesIO(_tar({"a.py": b"x = 2\n"}))) as tar:
+        assert abs(tar.getmembers()[0].mtime - _time.time()) < 60

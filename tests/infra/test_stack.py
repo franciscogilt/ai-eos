@@ -168,7 +168,7 @@ def test_kms_key_rotates_and_survives_stack_deletion(staging):
 
 def test_images_are_immutable_and_scanned(staging):
     repos = resources(staging, "AWS::ECR::Repository")
-    assert len(repos) == 3
+    assert len(repos) == 2  # platform, sandbox
     for repo in repos.values():
         p = repo["Properties"]
         assert p["ImageTagMutability"] == "IMMUTABLE" and p["ImageScanningConfiguration"] == {"ScanOnPush": True}
@@ -188,7 +188,7 @@ def test_only_the_gateway_holds_github_and_s3_write(staging):
     gateway = task_def(staging, "gateway")
     agents = task_def(staging, "agents")
     gw_env, ag_env = env_of(gateway, "gateway"), env_of(agents, "agents")
-    assert gw_env["SANDBOX_BACKEND"] == "docker" and "GITHUB_APP_PRIVATE_KEY_SECRET_ARN" in gw_env
+    assert gw_env["SANDBOX_BACKEND"] == "fargate" and "GITHUB_APP_PRIVATE_KEY_SECRET_ARN" in gw_env
     assert "GITHUB_APP_PRIVATE_KEY_SECRET_ARN" not in ag_env and "SANDBOX_BACKEND" not in ag_env
     assert "ANTHROPIC_API_KEY" in ag_env and "ANTHROPIC_API_KEY" not in gw_env  # model keys: agents only
 
@@ -198,21 +198,51 @@ def test_only_the_gateway_holds_github_and_s3_write(staging):
     assert "s3:" not in agents_policy and "GitHubAppKey" not in agents_policy
 
 
-def test_sandbox_host_has_no_inbound_and_protects_instance_credentials(staging):
-    sgs = [
+def test_sandbox_tasks_have_no_credentials_and_no_internet(staging):
+    td = task_def(staging, "sandbox")
+    assert "TaskRoleArn" not in td["Properties"]  # no AWS credentials inside a sandbox
+    container = td["Properties"]["ContainerDefinitions"][0]
+    assert container["ReadonlyRootFilesystem"] is True and container["User"] == "0"
+    assert container["EntryPoint"] == ["python3", "/opt/aieos/executor.py"]
+    assert "LogConfiguration" not in container  # no egress to CloudWatch needed
+
+    sg = next(
         r["Properties"]
         for r in resources(staging, "AWS::EC2::SecurityGroup").values()
-        if "Sandbox host" in r["Properties"].get("GroupDescription", "")
-    ]
-    assert sgs and "SecurityGroupIngress" not in sgs[0]
-    staging.has_resource_properties(
-        "AWS::EC2::LaunchTemplate",
-        {
-            "LaunchTemplateData": Match.object_like(
-                {"MetadataOptions": Match.object_like({"HttpTokens": "required", "HttpPutResponseHopLimit": 1})}
-            )
-        },
+        if r["Properties"].get("GroupDescription") == "Code sandbox: no internet"
     )
+    egress = [e for e in sg.get("SecurityGroupEgress", [])]
+    egress += [
+        r["Properties"]
+        for r in resources(staging, "AWS::EC2::SecurityGroupEgress").values()
+        if "SandboxSg" in json.dumps(r["Properties"].get("GroupId"))
+    ]
+    assert egress and all(e.get("FromPort") == 443 and "CidrIp" not in e for e in egress)
+    ingress = [
+        r["Properties"]
+        for r in resources(staging, "AWS::EC2::SecurityGroupIngress").values()
+        if "SandboxSg" in json.dumps(r["Properties"].get("GroupId"))
+    ]
+    assert [i["FromPort"] for i in ingress] == [7070] and "Gateway" in json.dumps(ingress[0]["SourceSecurityGroupId"])
+
+    # Sandbox subnets are isolated: no route to a NAT or internet gateway.
+    for rt in resources(staging, "AWS::EC2::Route").values():
+        if "sandbox" in json.dumps(rt["Properties"]["RouteTableId"]).lower():
+            raise AssertionError("sandbox subnets must not have routes out of the VPC")
+
+    # Their S3 endpoint only serves ECR's layer bucket.
+    policies = [
+        json.dumps(r["Properties"].get("PolicyDocument", {}))
+        for r in resources(staging, "AWS::EC2::VPCEndpoint").values()
+        if r["Properties"].get("VpcEndpointType", "Gateway") == "Gateway"
+    ]
+    assert any("starport-layer-bucket" in p for p in policies)
+
+
+def test_gateway_may_start_only_sandbox_tasks(staging):
+    policy = policy_text_for_role(staging, "GatewayTaskTaskRole")
+    assert "ecs:RunTask" in policy and "SandboxTask" in policy
+    assert "iam:PassRole" in policy and '"Action": "*"' not in policy
 
 
 def test_api_is_https_only_in_production(production, staging):
