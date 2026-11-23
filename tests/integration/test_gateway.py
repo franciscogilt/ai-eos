@@ -301,3 +301,38 @@ def test_artifact_tools_through_gateway(provisioned_db, world):
 
         wrote, read = asyncio.run(main())
     assert wrote.status == "succeeded" and read.result["text"] == "REQ-1: export CSV"
+
+
+def test_supervisor_may_push_and_merge_only_with_approval(provisioned_db, world):
+    """The orchestrator acts as the supervisor run; push and merge are granted to it (Level 3,
+    so they wait for a human) and to no other agent."""
+    org = world["org"]
+    w = runs(provisioned_db, org, "supervisor")
+    calls, handler = counting({})
+    handlers = {"github.push_branch": handler, "github.merge_pull_request": handler}
+    push = req(
+        org,
+        w,
+        w["supervisor"],
+        "github.push_branch",
+        {"branch": "aieos/x", "patch_artifact_ids": []},
+        call_id="push-branch",
+    )
+    merge = req(
+        org,
+        w,
+        w["supervisor"],
+        "github.merge_pull_request",
+        {"pull_request": 1, "head_sha": "a" * 40},
+        call_id="merge-pull-request",
+    )
+    for r in (push, merge):
+        assert gateway_call(provisioned_db, r, handlers).status == "awaiting_approval"
+    assert calls.n == 0
+    dev = runs(provisioned_db, org, "developer")
+    denied = gateway_call(
+        provisioned_db,
+        req(org, dev, dev["developer"], "github.merge_pull_request", {"pull_request": 1}, call_id="m2"),
+        handlers,
+    )
+    assert denied.status == "denied" and "not granted" in denied.reason

@@ -70,8 +70,26 @@ authorized, recorded and audited like any other call.
   - bandit and the secret scan;
   - `prepare` refusing foreign or broken patches.
 
+## Merge and comment (B15b)
+`github.merge_pull_request` is Level 3, so a human approves it (unless the project auto-approves it).
+- The orchestrator passes the PR's `head_sha` with the request. The approval is bound to the request
+  digest, so it covers exactly one commit.
+- The handler merges only if all of these hold:
+  - the PR comes from this workflow's `aieos/<workflow id>` branch in the same repository;
+  - it targets the default branch and is open;
+  - its head is the approved `head_sha`;
+  - that sha is the commit the platform last pushed (from the gateway's own record).
+- Anyone pushing to the branch after review therefore blocks the merge. GitHub enforces the same rule
+  through the `sha` precondition, and branch protection and required checks still apply. The App cannot
+  bypass them.
+- It squash-merges, then deletes the `aieos/` branch. Re-running after a crash returns "already merged".
+- `github.comment` posts only on this workflow's own PRs.
+- The supervisor contract (1.2.0) is now granted `github.push_branch`, `github.comment` and
+  `github.merge_pull_request`. The orchestrator acts as the supervisor run; before this, a real push would
+  have been denied. No other agent holds these tools (integration test).
+
 ## Not yet
-- `github.merge_pull_request` and `github.comment` handlers. The workflow stops at the merge step, which
-  needs human approval anyway.
 - Running agent model/tool calls as separate Temporal activities (ADR-0001). A crash mid-step re-runs the
   step in a new sandbox.
+- A live merge test. CI merges only into the in-memory GitHub, so that the playground's default branch
+  is not changed on every run.

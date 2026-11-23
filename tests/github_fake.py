@@ -52,6 +52,8 @@ class FakeGitHub:
     requests: list[httpx.Request] = field(default_factory=list)
     token_requests: list[dict[str, Any]] = field(default_factory=list)
     tarball_override: bytes | None = None
+    comments: list[dict[str, Any]] = field(default_factory=list)
+    merge_status: int = 200  # e.g. 405 when branch protection blocks the merge
 
     # ------------------------------------------------------------------ setup helpers
     def _tree_id(self, files: Files, prefix: str = "") -> str:
@@ -163,13 +165,39 @@ class FakeGitHub:
                 return httpx.Response(422, json={"message": "A pull request already exists"})
             pr = {
                 "number": len(self.pulls) + 1,
+                "state": "open",
+                "merged": False,
+                "merge_commit_sha": None,
                 "html_url": f"https://github.test/{self.owner}/{self.repo}/pull/{len(self.pulls) + 1}",
-                "head": {"ref": body["head"], "sha": self.refs.get(body["head"])},
+                "head": {
+                    "ref": body["head"],
+                    "sha": self.refs.get(body["head"]),
+                    "repo": {"full_name": f"{self.owner}/{self.repo}"},
+                },
                 "base": {"ref": body["base"]},
                 "title": body["title"],
             }
             self.pulls.append(pr)
             return httpx.Response(201, json=pr)
+        if method == "GET" and (m := re.fullmatch(r"/pulls/(\d+)", sub)):
+            pr = self.pulls[int(m.group(1)) - 1]
+            if pr["state"] == "open":  # the head follows the branch, as on GitHub
+                pr["head"]["sha"] = self.refs.get(pr["head"]["ref"], pr["head"]["sha"])
+            return httpx.Response(200, json=pr)
+        if method == "PUT" and (m := re.fullmatch(r"/pulls/(\d+)/merge", sub)):
+            pr = self.pulls[int(m.group(1)) - 1]
+            if self.merge_status != 200:
+                return httpx.Response(self.merge_status, json={"message": "Required status check is expected."})
+            if body["sha"] != self.refs.get(pr["head"]["ref"]):
+                return httpx.Response(409, json={"message": "Head branch was modified."})
+            base = pr["base"]["ref"]
+            squash = self.commit(self.files_at(pr["head"]["ref"]), parent=self.refs[base], message=body["commit_title"])
+            self.refs[base] = squash
+            pr.update(state="closed", merged=True, merge_commit_sha=squash)
+            return httpx.Response(200, json={"sha": squash, "merged": True})
+        if method == "POST" and (m := re.fullmatch(r"/issues/(\d+)/comments", sub)):
+            self.comments.append({"number": int(m.group(1)), "body": body["body"]})
+            return httpx.Response(201, json={"id": len(self.comments), "html_url": "https://github.test/c"})
         if method == "GET" and sub == "/pulls":
             head = request.url.params["head"].split(":", 1)[1]
             return httpx.Response(200, json=[p for p in self.pulls if p["head"]["ref"] == head])

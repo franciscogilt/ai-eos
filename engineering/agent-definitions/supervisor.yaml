@@ -1,7 +1,7 @@
 api_version: aieos/v1
 key: supervisor
 name: Supervisor Agent
-version: 1.1.0
+version: 1.2.0
 purpose: Coordinate a feature_delivery workflow by choosing the next step from the current state.
 responsibilities:
   - Interpret the user's request and the state of completed steps.
@@ -24,7 +24,10 @@ model:
 tools:
   - artifacts.read
   - workflow.ask_user
+  - github.push_branch
   - github.create_pull_request
+  - github.comment
+  - github.merge_pull_request
 max_permission_level: 3
 limits:
   max_turns: 8

@@ -432,12 +432,86 @@ class GitHubTools:
         )
         return {**pr, "head": head, "base": wr.default_branch}
 
+    # ------------------------------------------------------------------ merge and comment (Level 3)
+    async def _last_pushed_commit(self, org_id: UUID, workflow_id: UUID) -> str | None:
+        async with self._db.tenant(org_id) as conn:
+            value = (
+                await conn.execute(
+                    text(
+                        """SELECT result->>'commit_sha' FROM tool_executions
+                           WHERE workflow_id = :wf AND tool_name = 'github.push_branch' AND status = 'succeeded'
+                           ORDER BY finished_at DESC NULLS LAST LIMIT 1"""
+                    ),
+                    {"wf": workflow_id},
+                )
+            ).scalar_one_or_none()
+        return str(value) if value else None
+
+    async def _workflow_pr(
+        self, ctx: ToolContext, args: dict[str, Any]
+    ) -> tuple[WorkflowRepo, GitHubRepo, dict[str, Any]]:
+        number = args.get("pull_request")
+        if not isinstance(number, int) or isinstance(number, bool) or number < 1:
+            raise ToolInputError("pull_request (number) is required")
+        wr = await self.workflow_repo(ctx.org_id, ctx.workflow_id)
+        repo = self._app.repo(wr.repo)
+        pr = await self._github(repo.pull_request(number))
+        try:
+            check_branch(pr["head_ref"], ctx.workflow_id)
+        except ToolInputError:
+            raise ToolInputError(f"pull request #{number} was not opened for this workflow") from None
+        if pr["head_repo"] and pr["head_repo"].lower() != wr.repo.full_name.lower():
+            raise ToolInputError(f"pull request #{number} comes from another repository")
+        return wr, repo, pr
+
+    async def merge_pull_request(self, ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+        """Merge only the exact commit the platform pushed after review, into the default branch.
+
+        `head_sha` is part of the approved request, so an approval covers one commit: if anyone pushes
+        to the branch afterwards, the merge is refused here and by GitHub (`sha` precondition)."""
+        expected = args.get("head_sha")
+        if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{40}", expected):
+            raise ToolInputError("head_sha (40-character commit id) is required")
+        wr, repo, pr = await self._workflow_pr(ctx, args)
+        if pr["base_ref"] != wr.default_branch:
+            raise ToolInputError(f"pull request targets {pr['base_ref']}, not {wr.default_branch}")
+        if pr["merged"]:
+            if pr["head_sha"] == expected:  # re-run after a crash: already done
+                return {"merged": True, "number": pr["number"], "merge_commit_sha": pr["merge_commit_sha"]}
+            raise ToolFailedError(f"pull request #{pr['number']} was merged with a different head")
+        if pr["state"] != "open":
+            raise ToolFailedError(f"pull request #{pr['number']} is {pr['state']}")
+        pushed = await self._last_pushed_commit(ctx.org_id, ctx.workflow_id)
+        if pr["head_sha"] != expected or expected != pushed:
+            raise ToolFailedError(
+                "the pull request head is not the commit the platform pushed after review; not merged"
+            )
+        merge_sha = await self._github(
+            repo.merge_pull_request(pr["number"], head_sha=expected, title=f"{wr.title[:72]} (#{pr['number']})")
+        )
+        try:
+            await repo.delete_branch(pr["head_ref"])
+        except GitHubError as exc:  # the merge is what matters; a leftover aieos/* branch is harmless
+            log.warning("github.branch_not_deleted", branch=pr["head_ref"], error=str(exc))
+        log.info("github.merged", workflow_id=str(ctx.workflow_id), number=pr["number"], merge_sha=merge_sha)
+        return {"merged": True, "number": pr["number"], "merge_commit_sha": merge_sha}
+
+    async def comment(self, ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+        body = args.get("body")
+        if not isinstance(body, str) or not body.strip() or len(body) > 20_000:
+            raise ToolInputError("body (1 to 20000 characters) is required")
+        _, repo, pr = await self._workflow_pr(ctx, args)
+        result: dict[str, Any] = await self._github(repo.comment(pr["number"], body))
+        return result
+
     def handlers(self) -> dict[str, Handler]:
         handlers: dict[str, Handler] = {
             "repo.list_tree": self.list_tree,
             "repo.read_file": self.read_file,
             "repo.search": self.search,
             "github.create_pull_request": self.create_pull_request,
+            "github.merge_pull_request": self.merge_pull_request,
+            "github.comment": self.comment,
         }
         if self._sandboxes is not None:
             handlers["github.push_branch"] = self.push_branch

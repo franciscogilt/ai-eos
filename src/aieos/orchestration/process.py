@@ -148,7 +148,12 @@ class DeliveryProcess:
             await self._tool(
                 "merge-pull-request",
                 "github.merge_pull_request",
-                {"repository_id": str(self._in.repository_id), "pull_request": (pr.result or {}).get("number")},
+                {
+                    "repository_id": str(self._in.repository_id),
+                    "pull_request": (pr.result or {}).get("number"),
+                    # Binds the human approval to this exact commit.
+                    "head_sha": (pr.result or {}).get("head_sha"),
+                },
             )
             await self._rt.cleanup(org, wf)
             await self._workflow_status("succeeded")

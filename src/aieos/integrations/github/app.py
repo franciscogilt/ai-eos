@@ -123,6 +123,7 @@ class GitHubApp:
 READ = {"contents": "read"}
 WRITE = {"contents": "write"}
 PULLS = {"pull_requests": "write"}
+MERGE = {"contents": "write", "pull_requests": "write"}
 
 
 class GitHubRepo:
@@ -284,3 +285,35 @@ class GitHubRepo:
                 raise
             data = found[0]
         return {"number": int(data["number"]), "url": str(data["html_url"]), "head_sha": data["head"]["sha"]}
+
+    async def pull_request(self, number: int) -> dict[str, Any]:
+        r = await self._call("GET", f"/pulls/{int(number)}", PULLS, what="read pull request")
+        data = r.json()
+        return {
+            "number": int(data["number"]),
+            "state": str(data["state"]),
+            "merged": bool(data.get("merged")),
+            "head_ref": str(data["head"]["ref"]),
+            "head_sha": str(data["head"]["sha"]),
+            "head_repo": str(((data["head"].get("repo") or {}).get("full_name")) or ""),
+            "base_ref": str(data["base"]["ref"]),
+            "merge_commit_sha": data.get("merge_commit_sha"),
+            "url": str(data.get("html_url", "")),
+        }
+
+    async def merge_pull_request(self, number: int, *, head_sha: str, title: str) -> str:
+        """Squash-merge, only if the head is still `head_sha` (GitHub refuses otherwise). Branch
+        protection and required checks are enforced by GitHub; the App cannot bypass them."""
+        r = await self._call(
+            "PUT",
+            f"/pulls/{int(number)}/merge",
+            MERGE,
+            what="merge pull request",
+            json={"sha": head_sha, "merge_method": "squash", "commit_title": title},
+        )
+        return str(r.json()["sha"])
+
+    async def comment(self, number: int, body: str) -> dict[str, Any]:
+        r = await self._call("POST", f"/issues/{int(number)}/comments", PULLS, what="comment", json={"body": body})
+        data = r.json()
+        return {"comment_id": int(data["id"]), "url": str(data.get("html_url", ""))}

@@ -59,3 +59,41 @@ def test_other_organizations_workflows_are_invisible(provisioned_db, org):
 
     with pytest.raises(ToolInputError, match="workflow not found"):
         resolve(provisioned_db, org, wf, FakeGitHub())
+
+
+def test_last_pushed_commit_comes_from_the_gateway_record(provisioned_db, org):
+    import json
+
+    ids = seed_workflow(provisioned_db.owner_conninfo, org)
+    rows = [
+        ("succeeded", "a" * 40, "2026-01-01 10:00+00"),
+        ("succeeded", "b" * 40, "2026-01-01 11:00+00"),
+        ("failed", "c" * 40, "2026-01-01 12:00+00"),
+    ]
+    with psycopg.connect(provisioned_db.owner_conninfo) as c:
+        for i, (status, sha, finished) in enumerate(rows):
+            c.execute(
+                """INSERT INTO tool_executions (org_id, workflow_id, agent_run_id, tool_name, permission_level,
+                       decision, decision_reason, idempotency_key, request_digest, status, result, finished_at)
+                   VALUES (%s, %s, %s, 'github.push_branch', 3, 'allow', 'ok', %s, %s, %s, %s, %s)""",
+                (
+                    org,
+                    ids["workflow"],
+                    ids["run"],
+                    f"k{i}-{ids['workflow']}",
+                    "0" * 64,
+                    status,
+                    json.dumps({"commit_sha": sha}),
+                    finished,
+                ),
+            )
+
+    async def main():
+        db = Database(provisioned_db.app_async_url, pool_size=2, max_overflow=0)
+        try:
+            tools = GitHubTools(db, app(FakeGitHub()), store=None, sandboxes=None)  # type: ignore[arg-type]
+            return await tools._last_pushed_commit(org, ids["workflow"])
+        finally:
+            await db.dispose()
+
+    assert asyncio.run(main()) == "b" * 40  # latest successful push; the failed attempt does not count
