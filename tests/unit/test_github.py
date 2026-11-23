@@ -265,6 +265,11 @@ class StubTools(GitHubTools):
     async def workflow_repo(self, org_id, workflow_id):  # no database in unit tests
         return self._wr
 
+    last_push: str | None = None
+
+    async def _last_pushed_commit(self, org_id, workflow_id):
+        return self.last_push
+
 
 def ctx(tool: str = "repo.read_file", workflow_id: uuid.UUID | None = None) -> ToolContext:
     spec = ToolSpec.model_validate(
@@ -404,3 +409,80 @@ def test_net_changes_compose_stacked_patches():
     for bad in ([[F("x", "delete")], [F("x", "modify")]], [[F("x", "add")], [F("x", "add")]]):
         with pytest.raises(PatchRejectedError):
             net_changes(bad)
+
+
+# ------------------------------------------------------------------ merge and comment
+def opened(fake: FakeGitHub, base: str, wf: uuid.UUID) -> tuple[StubTools, str, int]:
+    head = fake.commit({**fake.commits[base]["files"], "new.py": ("100644", b"x = 1\n")}, parent=base, message="aieos")
+    fake.refs[f"aieos/{wf}"] = head
+    tools = StubTools(fake, base)
+    tools.last_push = head
+    pr = asyncio.run(tools.create_pull_request(ctx("github.create_pull_request", wf), {"head": f"aieos/{wf}"}))
+    assert pr["head_sha"] == head
+    return tools, head, pr["number"]
+
+
+def merge(tools: StubTools, wf: uuid.UUID, number: int, head: str):
+    return asyncio.run(
+        tools.merge_pull_request(ctx("github.merge_pull_request", wf), {"pull_request": number, "head_sha": head})
+    )
+
+
+def test_merge_exactly_the_pushed_commit():
+    fake, base = seeded()
+    wf = uuid.uuid4()
+    tools, head, number = opened(fake, base, wf)
+    result = merge(tools, wf, number, head)
+    assert result["merged"] and fake.refs["main"] == result["merge_commit_sha"]
+    assert "new.py" in fake.files_at("main") and f"aieos/{wf}" not in fake.refs  # branch cleaned up
+    assert fake.token_requests[-2]["permissions"] == {"contents": "write", "pull_requests": "write"}
+    assert merge(tools, wf, number, head)["merged"]  # re-run after a crash: already merged, no error
+
+
+def test_merge_refuses_a_branch_changed_after_review():
+    fake, base = seeded()
+    wf = uuid.uuid4()
+    tools, head, number = opened(fake, base, wf)
+    fake.refs[f"aieos/{wf}"] = fake.commit({"evil.py": ("100644", b"x")}, parent=head, message="sneaky")
+    main_before = fake.refs["main"]
+    with pytest.raises(ToolFailedError, match="not the commit the platform pushed"):
+        merge(tools, wf, number, head)
+    assert fake.refs["main"] == main_before
+
+
+def test_merge_refuses_when_approved_sha_is_not_the_last_push():
+    fake, base = seeded()
+    wf = uuid.uuid4()
+    tools, head, number = opened(fake, base, wf)
+    tools.last_push = "f" * 40
+    with pytest.raises(ToolFailedError):
+        merge(tools, wf, number, head)
+    with pytest.raises(ToolInputError, match="head_sha"):
+        merge(tools, wf, number, "not-a-sha")
+
+
+def test_merge_refuses_other_workflows_pull_requests():
+    fake, base = seeded()
+    wf, other = uuid.uuid4(), uuid.uuid4()
+    tools, head, number = opened(fake, base, other)
+    with pytest.raises(ToolInputError, match="not opened for this workflow"):
+        merge(tools, wf, number, head)
+
+
+def test_branch_protection_blocks_merge_without_retry():
+    fake, base = seeded()
+    wf = uuid.uuid4()
+    tools, head, number = opened(fake, base, wf)
+    fake.merge_status = 405
+    with pytest.raises(ToolFailedError, match="Required status check"):
+        merge(tools, wf, number, head)
+
+
+def test_comment_on_own_pull_request_only():
+    fake, base = seeded()
+    wf = uuid.uuid4()
+    tools, _, number = opened(fake, base, wf)
+    asyncio.run(tools.comment(ctx("github.comment", wf), {"pull_request": number, "body": "Review summary"}))
+    assert fake.comments == [{"number": number, "body": "Review summary"}]
+    with pytest.raises(ToolInputError):
+        asyncio.run(tools.comment(ctx("github.comment", uuid.uuid4()), {"pull_request": number, "body": "x"}))

@@ -166,7 +166,14 @@ def test_factory_grants_only_contract_tools(loaded, catalog):
         loaded["supervisor"], catalog=catalog, invoker=RecordingInvoker(), scope=scope(), output_type=RequirementsSpec
     )
     names = set(sup.tools)
-    assert names == {wire_tool_name("artifacts.read"), wire_tool_name("github.create_pull_request")}  # no ask_user
+    granted = (
+        "artifacts.read",
+        "github.push_branch",
+        "github.create_pull_request",
+        "github.comment",
+        "github.merge_pull_request",
+    )
+    assert names == {wire_tool_name(t) for t in granted}  # no ask_user: orchestrator-only
     req = build_agent(
         loaded["requirements"], catalog=catalog, invoker=RecordingInvoker(), scope=scope(), output_type=RequirementsSpec
     )

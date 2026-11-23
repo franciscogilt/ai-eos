@@ -13,7 +13,7 @@ worker that authorizes every tool call, and human approvals through the API and 
 over Anthropic, Gemini, OpenAI or any OpenAI-compatible server; metered, grounding-checked; ADR-0002). **B13:** disposable Docker sandboxes, repository snapshots through the GitHub App, read-only repo
 tools, and a validated push path to `aieos/<workflow>` branches (tested live against a playground repo).
 **B15:** Developer and QA/Security agents run for real. Tests, patches and security scans are produced by
-the platform, never taken from a model's word; tasks stack and are pushed as one commit. Merging a PR is next. See `docs/blueprint/`.
+the platform, never taken from a model's word; tasks stack and are pushed as one commit, and the PR is merged only at the exact commit a human approved. See `docs/blueprint/`.
 
 ### Evaluating agents
 `aieos-eval --agent requirements --cases engineering/evals/requirements --max-usd 2` runs the

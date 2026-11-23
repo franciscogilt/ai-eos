@@ -150,7 +150,7 @@ def test_publish_agents_is_immutable(provisioned_db, published_agents, tmp_path)
             ("developer", "1.2.0"),
             ("qa_security", "1.2.0"),
             ("requirements", "1.1.0"),
-            ("supervisor", "1.1.0"),
+            ("supervisor", "1.2.0"),
         )
     )
     again = admin.publish_agents(provisioned_db.owner_conninfo, ENGINEERING)
