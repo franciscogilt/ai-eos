@@ -44,6 +44,8 @@ To use another tool for an agent, edit that slot. For example, point `gemini` at
   headless output, not against the real CLIs. Before relying on one, run a single eval on your machine:
   `MODEL_ROUTING_PATH=engineering/model-routing.local.yaml make eval` (or, without make:
   `uv run aieos-eval --agent requirements --cases engineering/evals/requirements --routing engineering/model-routing.local.yaml`).
+  The QA/Security agent (Antigravity in the local setup) has its own set: `--agent qa_security --cases
+  engineering/evals/qa_security`, or `make eval-qa`.
 - **Reply format.** Text-based tool calling is less reliable than native tool calls. Expect more
   "please reply with JSON" retries than with the APIs.
 - **Gemini CLI.** Since 2026-06-18 Gemini CLI no longer serves free, Google AI Pro or Ultra accounts;

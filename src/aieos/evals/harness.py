@@ -1,9 +1,14 @@
 """`aieos-eval`: golden-set evaluation of agents against real models.
 
 Uses the production path (contract, prompt, factory, grounding retries, metered model) with
-tools disabled and a hard USD cap for the whole suite. No database is needed.
+tools disabled and a hard USD cap for the whole suite. No database, sandbox or GitHub is needed.
 
     aieos-eval --agent requirements --cases engineering/evals/requirements --max-usd 2 --report eval.json
+    aieos-eval --agent qa_security --cases engineering/evals/qa_security
+
+QA/Security cases describe the patch under review and the platform's evidence (test run, security
+scan) in `context`; the platform steps are scripted from it (`ScriptedPlatform`), so the model is
+judged on its review alone. A `_shared.yaml` in a cases directory provides default `context`.
 """
 
 from __future__ import annotations
@@ -21,11 +26,13 @@ from typing import Any
 
 import yaml
 
+from aieos.agents.delivery import prepare_qa_security
 from aieos.agents.errors import AgentStepError
 from aieos.agents.factory import RunScope, build_agent, run_with_retries
 from aieos.agents.registry import LoadedContract, load_all
 from aieos.agents.runner import PREPARERS
-from aieos.contracts.io import RequirementsSpec
+from aieos.agents.steps import StepTools, resolve
+from aieos.contracts.io import RequirementsSpec, ReviewReport
 from aieos.contracts.tools import ToolRequest, ToolResult
 from aieos.gateway.catalog import ToolCatalog, load_catalog
 from aieos.providers.config import load_routing_config
@@ -40,9 +47,10 @@ from aieos.providers.router import ModelRouter
 class EvalCase:
     id: str
     agent: str
-    request: str
+    request: str = ""
     clarifications: dict[str, str] = field(default_factory=dict)
     expect: dict[str, Any] = field(default_factory=dict)
+    context: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -91,8 +99,61 @@ class NoTools:
         return ToolResult(status="failed", reason="tools are disabled in evals; answer from the input only")
 
 
+class ScriptedPlatform:
+    """The platform side of a QA step, from a case's `context`. Model tool calls are refused."""
+
+    def __init__(self, context: dict[str, Any]) -> None:
+        self._context = context
+
+    async def invoke(self, request: ToolRequest) -> ToolResult:
+        c = self._context
+        if request.call_id == "prepare":
+            return ToolResult(status="succeeded", reason="ok", result={})
+        if request.call_id == "read-patch":
+            return ToolResult(status="succeeded", reason="ok", result={"text": c.get("patch", "")})
+        if request.call_id == "platform-tests":
+            tests = {"passed": True, "exit_code": 0, "timed_out": False, "stdout": "", **c.get("tests", {})}
+            return ToolResult(status="succeeded", reason="ok", result=tests)
+        if request.call_id == "platform-scan":
+            scan = {"scanners": ["secrets", "bandit"], "findings": c.get("scan_findings", []), "not_run": []}
+            return ToolResult(status="succeeded", reason="ok", result=scan)
+        if request.tool_name == "artifacts.write":
+            return ToolResult(
+                status="succeeded", reason="ok", result={"artifact_id": str(uuid.uuid4()), "sha256": "0" * 64}
+            )
+        return ToolResult(status="failed", reason="tools are disabled in evals; review from the evidence given")
+
+
+def check_review(report: ReviewReport, expect: dict[str, Any]) -> list[Check]:
+    checks: list[Check] = []
+    if "verdict" in expect:
+        checks.append(
+            Check("verdict", report.verdict == expect["verdict"], f"expected {expect['verdict']}, got {report.verdict}")
+        )
+    for criterion, want in (expect.get("criteria") or {}).items():
+        got = report.acceptance_criteria_results.get(criterion)
+        checks.append(Check(f"criterion:{criterion}", got == want, f"expected {want}, got {got}"))
+    categories = expect.get("finding_category_any")
+    if categories:
+        order = ["info", "low", "medium", "high", "critical"]
+        floor = order.index(expect.get("min_severity", "medium"))
+        hits = [f for f in report.findings if f.category in categories and order.index(f.severity) >= floor]
+        checks.append(
+            Check("finding", bool(hits), f"needs a {'/'.join(categories)} finding of severity >= {order[floor]}")
+        )
+    return checks
+
+
 def load_cases(directory: Path) -> list[EvalCase]:
-    cases = [EvalCase(**yaml.safe_load(p.read_text(encoding="utf-8"))) for p in sorted(directory.glob("*.yaml"))]
+    shared_path = directory / "_shared.yaml"
+    shared = yaml.safe_load(shared_path.read_text(encoding="utf-8")) if shared_path.exists() else {}
+    cases = []
+    for p in sorted(directory.glob("*.yaml")):
+        if p.name.startswith("_"):
+            continue
+        raw = yaml.safe_load(p.read_text(encoding="utf-8"))
+        raw["context"] = {**(shared.get("context") or {}), **(raw.get("context") or {})}
+        cases.append(EvalCase(**raw))
     if len({c.id for c in cases}) != len(cases):
         raise ValueError("duplicate eval case ids")
     return cases
@@ -138,11 +199,22 @@ async def run_case(
     scope = RunScope(
         org_id=ids["org"], workflow_id=ids["wf"], agent_run_id=ids["run"], max_tool_calls=contract.limits.max_tool_calls
     )
-    prepared = PREPARERS[case.agent]({"request": case.request, "clarifications": case.clarifications}, scope)
+    invoker: Any = NoTools()
+    if case.agent == "qa_security":
+        invoker = ScriptedPlatform(case.context)
+        inputs = {
+            **case.context,
+            "base_patches": [],
+            "patch_artifact_id": str(uuid.uuid4()),
+            "author_agent_run_id": str(uuid.uuid4()),
+        }
+        prepared = await prepare_qa_security(inputs, scope, StepTools(invoker, scope))
+    else:
+        prepared = PREPARERS[case.agent]({"request": case.request, "clarifications": case.clarifications}, scope)
     try:
         output, attempts = await run_with_retries(
             lambda attempt: build_agent(
-                loaded, catalog=catalog, invoker=NoTools(), scope=scope, output_type=prepared.output_type
+                loaded, catalog=catalog, invoker=invoker, scope=scope, output_type=prepared.output_type
             ),
             prepared.message,
             model=router.model_for_run(contract, ctx, budget),
@@ -154,7 +226,13 @@ async def run_case(
         )
     except (AgentStepError, BudgetExceededError, ProviderError, ModelUnavailableError) as exc:
         return CaseResult(case.id, False, [Check("completed", False, str(exc))], error=type(exc).__name__)
-    checks = check_requirements(output, case.expect) if case.agent == "requirements" else []
+    if case.agent == "requirements":
+        checks = check_requirements(output, case.expect)
+    elif case.agent == "qa_security":
+        await resolve(prepared.to_output(output))  # same post-processing as production
+        checks = check_review(output, case.expect)
+    else:
+        checks = []
     if "max_attempts" in case.expect:
         checks.append(Check("max_attempts", attempts <= int(case.expect["max_attempts"]), f"took {attempts}"))
     return CaseResult(case.id, all(c.passed for c in checks), checks, attempts)
@@ -170,7 +248,7 @@ async def run_suite(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="aieos-eval")
-    parser.add_argument("--agent", required=True, choices=sorted(PREPARERS))
+    parser.add_argument("--agent", required=True, choices=sorted({*PREPARERS, "qa_security"}))
     parser.add_argument("--cases", type=Path, required=True)
     parser.add_argument("--engineering", type=Path, default=Path("engineering"))
     parser.add_argument(

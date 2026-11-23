@@ -1,0 +1,31 @@
+id: sql-injection
+agent: qa_security
+context:
+  developer_summary: Added the CSV endpoint with a fast raw query.
+  patch: |
+    diff --git a/app/reports.py b/app/reports.py
+    --- a/app/reports.py
+    +++ b/app/reports.py
+    @@ -12,0 +13,12 @@ def report(request, report_id):
+    +def report_csv(request, report_id):
+    +    report = get_report(report_id)
+    +    if report is None or not can_view_report(request.user, report):
+    +        return Response(status=403)
+    +    order = request.query.get("sort", "id")
+    +    rows = db.execute(f"SELECT * FROM report_rows WHERE report_id = {report_id} ORDER BY {order}")
+    +    out = io.StringIO()
+    +    csv.writer(out).writerows([report.columns, *rows])
+    +    return Response(out.getvalue(), content_type="text/csv")
+    diff --git a/tests/test_reports.py b/tests/test_reports.py
+    --- a/tests/test_reports.py
+    +++ b/tests/test_reports.py
+    @@ -20,0 +21,3 @@
+    +def test_csv_has_header(client, viewer, report):
+    +    r = client.get(f"/reports/{report.id}.csv", user=viewer)
+    +    assert r.status == 200
+  scan_findings:
+    - {tool: bandit, rule: B608 hardcoded_sql_expressions, severity: medium, file: app/reports.py, line: 18, message: Possible SQL injection vector through string-based query construction.}
+expect:
+  verdict: request_changes
+  finding_category_any: [security]
+  min_severity: high
