@@ -111,3 +111,18 @@ class SandboxSettings(BaseSettings):
     sandbox_default_memory_mb: int = Field(default=2048, ge=256, le=32768)
     sandbox_default_timeout_seconds: int = Field(default=900, ge=10, le=3600)
     sandbox_max_age_seconds: int = Field(default=6 * 3600, ge=600)
+
+
+class GitHubSettings(BaseSettings):
+    """GitHub App credentials, read only by the tool-gateway worker. The private key is a file path
+    (mounted secret), never an inline value, so it cannot leak through environment dumps."""
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", frozen=True)
+
+    github_app_id: str | None = None
+    github_app_private_key_path: Path | None = None
+    github_api_url: str = "https://api.github.com"
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.github_app_id and self.github_app_private_key_path)

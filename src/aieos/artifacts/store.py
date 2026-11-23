@@ -186,13 +186,17 @@ class ArtifactStore:
 
     # ------------------------------------------------------------------ read
     async def get_bytes(self, org_id: UUID, artifact_id: UUID) -> bytes:
+        return (await self.get(org_id, artifact_id))[1]
+
+    async def get(self, org_id: UUID, artifact_id: UUID) -> tuple[repo.ArtifactRow, bytes]:
+        """Metadata and integrity-checked content (RLS-scoped to the organization)."""
         async with self._db.tenant(org_id) as conn:
             row = await repo.get_artifact(conn, artifact_id)
         data: bytes = await asyncio.to_thread(self._read, row.s3_key)
         if len(data) != row.size_bytes or hashlib.sha256(data).hexdigest() != row.sha256:
             log.error("artifact.integrity_failure", artifact_id=str(artifact_id))
             raise ArtifactIntegrityError(f"artifact {artifact_id} failed its integrity check")
-        return data
+        return row, data
 
     def _read(self, key: str) -> bytes:
         try:

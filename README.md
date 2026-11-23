@@ -10,8 +10,9 @@ router: the Temporal `FeatureDeliveryWorkflow` (requirements → clarification �
 architecture → plan → develop/review per task → PR → merge approval), the tool-gateway
 worker that authorizes every tool call, and human approvals through the API and CLI.
 **B14:** the Requirements and Architecture agents run for real (our own provider-neutral agent loop
-over Anthropic, Gemini, OpenAI or any OpenAI-compatible server; metered, grounding-checked; ADR-0002). Developer and QA/Security agents (B15) and GitHub/sandbox tools (B13)
-are next; until then those steps fail fast with `AgentNotAvailable`. See `docs/blueprint/`.
+over Anthropic, Gemini, OpenAI or any OpenAI-compatible server; metered, grounding-checked; ADR-0002). **B13:** disposable Docker sandboxes, repository snapshots through the GitHub App, read-only repo
+tools, and a validated push path to `aieos/<workflow>` branches (tested live against a playground repo).
+Developer and QA/Security agents (B15) are next; until then those steps fail fast with `AgentNotAvailable`. See `docs/blueprint/`.
 
 ### Evaluating agents
 `aieos-eval --agent requirements --cases engineering/evals/requirements --max-usd 2` runs the
