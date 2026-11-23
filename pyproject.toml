@@ -36,6 +36,11 @@ aieos = "aieos.cli.main:main"
 aieos-eval = "aieos.evals.harness:main"
 
 [dependency-groups]
+# AWS infrastructure (infrastructure/aws, AWS CDK). Not installed in the platform images.
+infra = [
+    "aws-cdk-lib>=2.170,<3",
+    "constructs>=10.3,<11",
+]
 dev = [
     "pytest>=8.3",
     "ruff>=0.8",

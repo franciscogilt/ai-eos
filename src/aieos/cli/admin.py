@@ -18,11 +18,14 @@ from uuid import UUID
 
 import jwt
 import psycopg
+import psycopg.conninfo
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from jwt.algorithms import RSAAlgorithm
+from psycopg import sql
 
 from aieos.agents.registry import ContractError, load_all
+from aieos.core.dburl import database_url
 from aieos.core.ids import uuid7
 from aieos.gateway.catalog import load_catalog
 
@@ -33,6 +36,37 @@ DEV_KID = "aieos-dev-1"
 def owner_conninfo(url: str) -> str:
     """Accept SQLAlchemy-style URLs (postgresql+psycopg://) as well as libpq ones."""
     return url.replace("postgresql+psycopg://", "postgresql://", 1)
+
+
+def bootstrap_db(master_conninfo: str, *, owner_password: str, api_password: str, database: str = "aieos") -> list[str]:
+    """What infrastructure/docker/postgres/init-roles.sh does locally, for a managed server (RDS) whose
+    master user is not a superuser. Safe to run again: existing roles get their passwords reset."""
+    done: list[str] = []
+    with psycopg.connect(owner_conninfo(master_conninfo), autocommit=True) as conn:
+        master = conn.execute("SELECT current_user").fetchone()[0]  # type: ignore[index]
+        for role, password, extra in (
+            ("aieos_owner", owner_password, sql.SQL("LOGIN CREATEROLE")),
+            ("aieos_api", api_password, sql.SQL("LOGIN")),
+        ):
+            exists = conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,)).fetchone()
+            verb = sql.SQL("ALTER") if exists else sql.SQL("CREATE")
+            conn.execute(
+                sql.SQL("{} ROLE {} {} PASSWORD {}").format(verb, sql.Identifier(role), extra, sql.Literal(password))
+            )
+            done.append(f"role {role} {'updated' if exists else 'created'}")
+        # RDS: the master must be a member of a role to create a database owned by it.
+        conn.execute(sql.SQL("GRANT aieos_owner TO {}").format(sql.Identifier(master)))
+        if not conn.execute("SELECT 1 FROM pg_database WHERE datname = %s", (database,)).fetchone():
+            conn.execute(sql.SQL("CREATE DATABASE {} OWNER aieos_owner").format(sql.Identifier(database)))
+            done.append(f"database {database} created")
+        conn.execute(sql.SQL("REVOKE ALL ON DATABASE {} FROM PUBLIC").format(sql.Identifier(database)))
+        conn.execute(sql.SQL("GRANT CONNECT ON DATABASE {} TO aieos_api").format(sql.Identifier(database)))
+    target = psycopg.conninfo.make_conninfo(owner_conninfo(master_conninfo), dbname=database)
+    with psycopg.connect(target, autocommit=True) as conn:
+        conn.execute("ALTER SCHEMA public OWNER TO aieos_owner")
+        conn.execute("REVOKE CREATE ON SCHEMA public FROM PUBLIC")
+    done.append("schema public owned by aieos_owner")
+    return done
 
 
 def _upsert_user(conn: psycopg.Connection[Any], sub: str, email: str) -> UUID:
@@ -173,6 +207,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="aieos-admin")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    sub.add_parser(
+        "bootstrap-db",
+        help="AWS: create the owner and runtime roles and the database as the RDS master user (idempotent)",
+    )
     p = sub.add_parser("create-org", help="create an organization and its first owner")
     p.add_argument("--slug", required=True)
     p.add_argument("--name", required=True)
@@ -198,10 +236,19 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--ttl", type=int, default=3600)
 
     args = parser.parse_args(argv)
+    if args.command == "bootstrap-db":
+        master = database_url("MASTER_DATABASE_URL", "MASTER_DB")
+        if not master:
+            parser.error("MASTER_DATABASE_URL (or MASTER_DB_HOST/NAME/USER/PASSWORD) is not set")
+        owner_pw, api_pw = os.environ.get("OWNER_DB_PASSWORD"), os.environ.get("DB_PASSWORD")
+        if not owner_pw or not api_pw:
+            parser.error("OWNER_DB_PASSWORD and DB_PASSWORD are required")
+        print("\n".join(bootstrap_db(master, owner_password=owner_pw, api_password=api_pw)))
+        return 0
     if args.command in ("create-org", "add-member", "publish-agents"):
-        url = os.environ.get("OWNER_DATABASE_URL")
+        url = database_url("OWNER_DATABASE_URL", "OWNER_DB")
         if not url:
-            parser.error("OWNER_DATABASE_URL is not set")
+            parser.error("OWNER_DATABASE_URL (or OWNER_DB_HOST/NAME/USER/PASSWORD) is not set")
         if args.command == "publish-agents":
             print("\n".join(publish_agents(url, args.engineering)))
         elif args.command == "create-org":

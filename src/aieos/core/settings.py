@@ -7,10 +7,12 @@ never at first use.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import AnyHttpUrl, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from aieos.core.dburl import url_from_parts
 
 Environment = Literal["local", "test", "staging", "production"]
 
@@ -18,9 +20,19 @@ Environment = Literal["local", "test", "staging", "production"]
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", frozen=True)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _database_url_from_parts(cls, data: Any) -> Any:
+        if isinstance(data, dict) and not data.get("database_url"):
+            built = url_from_parts("DB")
+            if built:
+                data = {**data, "database_url": built}
+        return data
+
     environment: Environment = "local"
 
     # Runtime database connection: a member of aieos_app, never the table owner.
+    # DATABASE_URL, or on AWS the DB_HOST/DB_NAME/DB_USER/DB_PASSWORD parts (see core/dburl.py).
     database_url: SecretStr
     db_pool_size: int = Field(default=5, ge=1, le=50)
     db_max_overflow: int = Field(default=5, ge=0, le=50)
@@ -121,8 +133,21 @@ class GitHubSettings(BaseSettings):
 
     github_app_id: str | None = None
     github_app_private_key_path: Path | None = None
+    # AWS: read the key from Secrets Manager at startup instead of a file (never via an env var).
+    github_app_private_key_secret_arn: str | None = None
     github_api_url: str = "https://api.github.com"
 
     @property
     def configured(self) -> bool:
-        return bool(self.github_app_id and self.github_app_private_key_path)
+        key = self.github_app_private_key_path or self.github_app_private_key_secret_arn
+        return bool(self.github_app_id and key)
+
+    def private_key_pem(self) -> str:
+        if self.github_app_private_key_secret_arn:
+            import boto3
+
+            client = boto3.client("secretsmanager")
+            value = client.get_secret_value(SecretId=self.github_app_private_key_secret_arn)
+            return str(value["SecretString"])
+        assert self.github_app_private_key_path is not None
+        return self.github_app_private_key_path.read_text(encoding="utf-8")
