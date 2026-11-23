@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import shlex
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from aieos.artifacts.store import ArtifactStore
@@ -68,9 +69,23 @@ def _exec_result(r: Any) -> dict[str, Any]:
     }
 
 
+Snapshot = Callable[[ToolContext], Awaitable[bytes]]
+
+
 def sandbox_handlers(
-    manager: DockerSandboxManager, store: ArtifactStore, *, allowed_commands: frozenset[str] = DEFAULT_ALLOWED_COMMANDS
+    manager: DockerSandboxManager,
+    store: ArtifactStore,
+    *,
+    allowed_commands: frozenset[str] = DEFAULT_ALLOWED_COMMANDS,
+    snapshot: Snapshot | None = None,
 ) -> dict[str, Handler]:
+    """`snapshot` (B13) seeds a new sandbox with the workflow's repository at its base commit;
+    without it a sandbox starts empty."""
+
+    async def ensure(ctx: ToolContext) -> None:
+        source = snapshot
+        await manager.ensure(_key(ctx), snapshot=(lambda: source(ctx)) if source is not None else None)
+
     async def write_file(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
         path, content = args.get("path"), args.get("content")
         if not isinstance(path, str) or not isinstance(content, str):
@@ -78,7 +93,7 @@ def sandbox_handlers(
         data = content.encode("utf-8")
         if len(data) > MAX_FILE_BYTES:
             raise ToolInputError(f"file larger than {MAX_FILE_BYTES} bytes")
-        await manager.ensure(_key(ctx))
+        await ensure(ctx)
         try:
             written = await manager.write_file(_key(ctx), path, data)
         except UnsafePathError as exc:
@@ -87,7 +102,7 @@ def sandbox_handlers(
 
     async def run_command(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
         argv = _argv(args.get("command"), allowed_commands)
-        await manager.ensure(_key(ctx))
+        await ensure(ctx)
         try:
             result = await manager.exec(_key(ctx), argv, workdir=args.get("working_dir") or None)
         except UnsafePathError as exc:
@@ -101,13 +116,13 @@ def sandbox_handlers(
             if not isinstance(selector, str) or not _SELECTOR.match(selector):
                 raise ToolInputError("selector may contain only test paths, node ids and -k/-m expressions")
             argv += shlex.split(selector)
-        await manager.ensure(_key(ctx))
+        await ensure(ctx)
         result = _exec_result(await manager.exec(_key(ctx), argv))
         result["passed"] = result["exit_code"] == 0 and not result["timed_out"]
         return result
 
     async def export_patch(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
-        await manager.ensure(_key(ctx))
+        await ensure(ctx)
         patch, files = await manager.export_patch(_key(ctx))
         if not patch:
             return {"empty": True, "files_changed": []}

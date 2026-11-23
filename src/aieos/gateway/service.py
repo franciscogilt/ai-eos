@@ -26,7 +26,7 @@ from aieos.contracts.tools import ToolRequest, ToolResult
 from aieos.core.ids import uuid7
 from aieos.core.logging import get_logger, redact_value
 from aieos.gateway.catalog import ToolCatalog, ToolSpec
-from aieos.gateway.handlers import Handler, ToolContext, ToolInputError, ToolTransientError
+from aieos.gateway.handlers import Handler, ToolContext, ToolFailedError, ToolInputError, ToolTransientError
 from aieos.gateway.policy import (
     ApprovalRecord,
     Decision,
@@ -206,6 +206,8 @@ class ToolGateway:
             status, reason, result = "failed", f"transient error on a non-idempotent tool: {exc}", None
         except ToolInputError as exc:
             status, reason, result = "failed", f"invalid input: {exc}", None
+        except ToolFailedError as exc:
+            status, reason, result = "failed", str(exc)[:500], None
         except Exception as exc:
             log.exception("tool.handler_error", tool=req.tool_name)
             status, reason, result = "failed", f"tool error: {type(exc).__name__}", None

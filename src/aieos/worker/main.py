@@ -18,6 +18,7 @@ from aieos.agents.runner import AgentRunner
 from aieos.artifacts.store import ArtifactStore
 from aieos.core.logging import configure_logging, get_logger
 from aieos.core.settings import (
+    GitHubSettings,
     ModelRoutingSettings,
     SandboxSettings,
     Settings,
@@ -26,9 +27,11 @@ from aieos.core.settings import (
 )
 from aieos.gateway.activities import GatewayActivities
 from aieos.gateway.catalog import load_catalog
+from aieos.gateway.github_handlers import GitHubTools
 from aieos.gateway.handlers import artifact_handlers
 from aieos.gateway.sandbox_handlers import sandbox_handlers
 from aieos.gateway.service import ToolGateway
+from aieos.integrations.github.app import GitHubApp
 from aieos.orchestration.activities import OrchestrationActivities
 from aieos.orchestration.client import connect
 from aieos.orchestration.tool_bridge import TemporalToolInvoker, ToolCallWorkflow
@@ -84,7 +87,21 @@ async def _run(kind: str, engineering: Path) -> None:
                 ),
             )
             await sandboxes.reap(older_than_seconds=sandbox_settings.sandbox_max_age_seconds)
-            handlers |= sandbox_handlers(sandboxes, store)
+        github_settings = GitHubSettings()
+        github: GitHubTools | None = None
+        if github_settings.configured:
+            assert github_settings.github_app_private_key_path is not None
+            app = GitHubApp(
+                str(github_settings.github_app_id),
+                github_settings.github_app_private_key_path.read_text(encoding="utf-8"),
+                api_url=github_settings.github_api_url,
+            )
+            github = GitHubTools(db, app, store, sandboxes)
+            handlers |= github.handlers()
+        else:
+            log.warning("github.not_configured", detail="repo.* and github.* tools will fail with 'no handler'")
+        if sandboxes is not None:
+            handlers |= sandbox_handlers(sandboxes, store, snapshot=github.snapshot_for if github else None)
         gateway = ToolGateway(db, load_catalog(engineering / "tool-catalog.yaml"), handlers)
         worker = Worker(client, task_queue=GATEWAY_QUEUE, activities=GatewayActivities(gateway, sandboxes).all())
     stop = asyncio.Event()

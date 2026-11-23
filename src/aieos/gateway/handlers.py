@@ -1,8 +1,7 @@
 """Tool handlers: the code that actually performs an authorized tool call.
 
-Handlers run only after `ToolGateway` has authorized the call. GitHub and sandbox
-handlers arrive in B13; until then those tools fail with "no handler", which is the
-safe outcome.
+Handlers run only after `ToolGateway` has authorized the call. A tool without a
+handler in this worker fails with "no handler", which is the safe outcome.
 """
 
 from __future__ import annotations
@@ -69,3 +68,7 @@ def artifact_handlers(store: ArtifactStore) -> dict[str, Handler]:
         return {"artifact_id": str(row.id), "sha256": row.sha256, "size_bytes": row.size_bytes}
 
     return {"artifacts.read": read, "artifacts.write": write}
+
+
+class ToolFailedError(RuntimeError):
+    """The tool ran and failed for a reason the agent or a human should see (e.g. GitHub refused). Not retried."""

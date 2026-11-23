@@ -75,6 +75,13 @@ jobs:
     timeout-minutes: 15
     env:
       AIEOS_REQUIRE_DOCKER: "1"  # fail, never skip, in CI
+      # Live push-path check against the playground repository (test GitHub App, playground only).
+      # Secrets are not given to pull requests from forks, so the check is required only for this repository.
+      AIEOS_REQUIRE_GITHUB: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '1' || '0' }}
+      AIEOS_TEST_GITHUB_APP_ID: ${{ vars.AIEOS_TEST_GITHUB_APP_ID }}
+      AIEOS_TEST_GITHUB_INSTALLATION_ID: ${{ vars.AIEOS_TEST_GITHUB_INSTALLATION_ID }}
+      AIEOS_TEST_REPO: ${{ vars.AIEOS_TEST_REPO }}
+      AIEOS_TEST_GITHUB_APP_PRIVATE_KEY: ${{ secrets.AIEOS_TEST_GITHUB_APP_PRIVATE_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
