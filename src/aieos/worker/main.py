@@ -92,10 +92,9 @@ async def _run(kind: str, engineering: Path) -> None:
         github_settings = GitHubSettings()
         github: GitHubTools | None = None
         if github_settings.configured:
-            assert github_settings.github_app_private_key_path is not None
             app = GitHubApp(
                 str(github_settings.github_app_id),
-                github_settings.github_app_private_key_path.read_text(encoding="utf-8"),
+                github_settings.private_key_pem(),
                 api_url=github_settings.github_api_url,
             )
             github = GitHubTools(db, app, store, sandboxes)

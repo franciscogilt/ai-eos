@@ -1,0 +1,90 @@
+name: deploy
+
+# Manual only. Runs in the protected GitHub environment of the target (add required reviewers to
+# `staging` and `production` in repository Settings -> Environments); the AWS role trusts only jobs
+# in that environment. Nothing here runs until AWS_DEPLOY_ROLE_ARN and AWS_REGION are set as
+# environment variables there.
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        type: choice
+        options: [staging, production]
+        required: true
+      bootstrap_db:
+        description: First deploy only - create the database roles (safe to repeat)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write  # OIDC to AWS, no stored AWS keys
+
+concurrency:
+  group: deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+
+# REPLACE_WITH_SHA_PINS: pin every third-party action to a full commit SHA before first use.
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: ${{ inputs.environment }}
+    env:
+      ENVIRONMENT: ${{ inputs.environment }}
+      IMAGE_TAG: ${{ github.sha }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: aieos-deploy-${{ github.run_id }}
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      - name: Stack outputs
+        id: out
+        run: |
+          stack="aieos-${ENVIRONMENT}"
+          get() { aws cloudformation describe-stacks --stack-name "$stack" \
+                    --query "Stacks[0].Outputs[?OutputKey=='$1Output'].OutputValue" --output text; }
+          for k in PlatformRepo GatewayRepo SandboxRepo ClusterName AdminTaskDefinition AdminSecurityGroup PrivateSubnets; do
+            echo "$k=$(get $k)" >> "$GITHUB_OUTPUT"
+          done
+      - name: Build and push images (tags are immutable)
+        run: |
+          docker build -f infrastructure/docker/api.Dockerfile -t "${{ steps.out.outputs.PlatformRepo }}:$IMAGE_TAG" .
+          docker build -f infrastructure/docker/api.Dockerfile --target gateway -t "${{ steps.out.outputs.GatewayRepo }}:$IMAGE_TAG" .
+          docker build -f infrastructure/docker/sandbox.Dockerfile -t "${{ steps.out.outputs.SandboxRepo }}:$IMAGE_TAG" .
+          for repo in "${{ steps.out.outputs.PlatformRepo }}" "${{ steps.out.outputs.GatewayRepo }}" "${{ steps.out.outputs.SandboxRepo }}"; do
+            docker push "$repo:$IMAGE_TAG"
+          done
+      - name: Deploy the stack with the new images
+        working-directory: infrastructure/aws
+        run: |
+          uv sync --locked --group infra
+          npx --yes aws-cdk@2 deploy "aieos-${ENVIRONMENT}" -c env="$ENVIRONMENT" -c image_tag="$IMAGE_TAG" \
+            --require-approval never
+      - name: Database bootstrap, migrations, agent contracts
+        run: |
+          run_admin() {
+            overrides=$(jq -nc --arg c "$1" '{containerOverrides:[{name:"admin",command:[$c]}]}')
+            arn=$(aws ecs run-task --cluster "${{ steps.out.outputs.ClusterName }}" \
+              --task-definition "${{ steps.out.outputs.AdminTaskDefinition }}" --launch-type FARGATE \
+              --network-configuration "awsvpcConfiguration={subnets=[${{ steps.out.outputs.PrivateSubnets }}],securityGroups=[${{ steps.out.outputs.AdminSecurityGroup }}],assignPublicIp=DISABLED}" \
+              --overrides "$overrides" --query 'tasks[0].taskArn' --output text)
+            aws ecs wait tasks-stopped --cluster "${{ steps.out.outputs.ClusterName }}" --tasks "$arn"
+            code=$(aws ecs describe-tasks --cluster "${{ steps.out.outputs.ClusterName }}" --tasks "$arn" \
+              --query 'tasks[0].containers[0].exitCode' --output text)
+            echo "$1 -> exit $code"
+            test "$code" = "0"
+          }
+          if [ "${{ inputs.bootstrap_db }}" = "true" ]; then run_admin "aieos-admin bootstrap-db"; fi
+          run_admin "alembic upgrade head"
+          run_admin "aieos-admin publish-agents"

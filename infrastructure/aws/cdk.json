@@ -1,0 +1,32 @@
+{
+  "app": "uv run --group infra python app.py",
+  "context": {
+    "aieos:staging": {
+      "github_repository": "franciscogilt/ai-eos",
+      "oidc_issuer": "REPLACE_oidc_issuer_url",
+      "oidc_audience": "REPLACE_oidc_audience",
+      "oidc_jwks_url": "REPLACE_oidc_jwks_url",
+      "temporal_address": "REPLACE_namespace.account.tmprl.cloud:7233",
+      "temporal_namespace": "REPLACE_namespace.account",
+      "certificate_arn": null,
+      "db_instance_class": "t4g.micro",
+      "nat_gateways": 1
+    },
+    "aieos:production": {
+      "github_repository": "franciscogilt/ai-eos",
+      "oidc_issuer": "REPLACE_oidc_issuer_url",
+      "oidc_audience": "REPLACE_oidc_audience",
+      "oidc_jwks_url": "REPLACE_oidc_jwks_url",
+      "temporal_address": "REPLACE_namespace.account.tmprl.cloud:7233",
+      "temporal_namespace": "REPLACE_namespace.account",
+      "certificate_arn": "REPLACE_acm_certificate_arn",
+      "db_instance_class": "t4g.small",
+      "db_multi_az": true,
+      "nat_gateways": 2,
+      "api_desired_count": 2,
+      "create_github_oidc_provider": false
+    },
+    "@aws-cdk/aws-iam:minimizePolicies": true,
+    "@aws-cdk/core:target-partitions": ["aws"]
+  }
+}
