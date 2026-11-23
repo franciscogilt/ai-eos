@@ -16,6 +16,7 @@ from pydantic import BaseModel, ValidationError
 
 from aieos.agents.errors import AgentLimitError
 from aieos.core.logging import get_logger
+from aieos.observability.telemetry import mark_error, span
 from aieos.providers.llm import (
     AssistantMessage,
     ChatModel,
@@ -146,7 +147,20 @@ async def run_agent(
                 else:
                     results.append(ToolResultItem(call.id, call.name, "Accepted."))
             elif (tool := agent.tools.get(call.name)) is not None:
-                content, is_error = await tool.invoke(call.arguments)
+                with span(
+                    f"execute_tool {call.name}",
+                    **{
+                        "gen_ai.operation.name": "execute_tool",
+                        "gen_ai.tool.name": call.name,
+                        "gen_ai.tool.call.id": call.id,
+                        "gen_ai.agent.name": agent.name,
+                        "aieos.turn": turn,
+                    },
+                ) as current:
+                    content, is_error = await tool.invoke(call.arguments)
+                    current.set_attribute("aieos.tool.result_chars", len(content))
+                    if is_error:
+                        mark_error(current, "ToolError")
                 results.append(ToolResultItem(call.id, call.name, content, is_error))
             else:
                 results.append(ToolResultItem(call.id, call.name, f"Unknown tool {call.name!r}.", True))

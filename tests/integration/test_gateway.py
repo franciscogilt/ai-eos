@@ -336,3 +336,26 @@ def test_supervisor_may_push_and_merge_only_with_approval(provisioned_db, world)
         handlers,
     )
     assert denied.status == "denied" and "not granted" in denied.reason
+
+
+def test_gateway_decisions_are_traced_without_arguments(provisioned_db, world):
+    from opentelemetry.trace import StatusCode
+
+    from tests.tracing import SpanCapture, all_attribute_text
+
+    org = world["org"]
+    w = runs(provisioned_db, org, "developer")
+    _, handler = counting({"passed": True})
+    with SpanCapture() as cap:
+        gateway_call(
+            provisioned_db,
+            req(org, w, w["developer"], "sandbox.run_tests", {"command": "pytest -k ARG-CANARY-1"}),
+            {"sandbox.run_tests": handler},
+        )
+        gateway_call(provisioned_db, req(org, w, w["developer"], "no.such_tool", call_id="c2"), {})
+    ok, denied = cap.named("gateway ")
+    assert ok.name == "gateway sandbox.run_tests" and ok.attributes["aieos.tool.status"] == "succeeded"
+    assert ok.attributes["aieos.tool.permission_level"] == 2
+    assert ok.attributes["aieos.workflow_id"] == str(w["workflow"])
+    assert denied.attributes["aieos.tool.status"] == "denied" and denied.status.status_code is StatusCode.ERROR
+    assert "ARG-CANARY-1" not in all_attribute_text(cap.spans)

@@ -36,6 +36,7 @@ from aieos.gateway.policy import (
     evaluate,
     request_digest,
 )
+from aieos.observability.telemetry import mark_error, span
 from aieos.persistence import repositories as repo
 from aieos.persistence.db import Database
 
@@ -76,6 +77,24 @@ class ToolGateway:
 
     async def execute(self, req: ToolRequest) -> ToolResult:
         tool = self._catalog.get(req.tool_name)
+        with span(
+            f"gateway {req.tool_name}",
+            **{
+                "gen_ai.tool.name": req.tool_name,
+                "gen_ai.tool.call.id": req.call_id,
+                "aieos.tool.permission_level": int(tool.level) if tool else None,
+                "aieos.agent_run_id": req.agent_run_id,
+                "aieos.workflow_id": req.workflow_id,
+                "aieos.org_id": req.org_id,
+            },
+        ) as current:
+            result = await self._execute(req, tool)
+            current.set_attribute("aieos.tool.status", result.status)
+            if result.status in ("failed", "denied"):
+                mark_error(current, f"tool_{result.status}")
+            return result
+
+    async def _execute(self, req: ToolRequest, tool: ToolSpec | None) -> ToolResult:
         digest = request_digest(req.tool_name, req.arguments, str(req.workflow_id))
         level = int(tool.level) if tool else int(PermissionLevel.SENSITIVE)
 
