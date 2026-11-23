@@ -23,6 +23,7 @@ from uuid import UUID
 from pydantic import ValidationError
 from sqlalchemy import text
 
+from aieos.agents.checkpoints import Checkpoints
 from aieos.agents.delivery import prepare_developer, prepare_qa_security
 from aieos.agents.errors import AgentNotAvailableError, ContractViolationError, ModelRequestRejectedError
 from aieos.agents.factory import RunScope, ToolInvoker, build_agent, run_with_retries
@@ -128,8 +129,10 @@ class AgentRunner:
         invoker: ToolInvoker,
         engineering_dir: Path,
         catalog: ToolCatalog | None = None,
+        checkpoints: Checkpoints | None = None,
     ) -> None:
         self._db = db
+        self._checkpoints = checkpoints
         self._router = router
         self._recorder = recorder
         self._invoker = invoker
@@ -169,6 +172,11 @@ class AgentRunner:
             raise AgentNotAvailableError(f"agent {request.agent_key!r} has no step runner")
         loaded = self._verified(await self._published(request.org_id, agent_run_id))
         contract = loaded.contract
+        state = await self._checkpoints.load(request.org_id, agent_run_id) if self._checkpoints else None
+        if state and state.get("result"):
+            # The step finished before the worker died; return the recorded result.
+            log.info("agent.step_already_completed", agent=contract.key, agent_run_id=str(agent_run_id))
+            return AgentStepResult.model_validate(state["result"])
         ctx = MeteringContext(
             org_id=request.org_id,
             workflow_id=request.workflow_id,
@@ -215,6 +223,9 @@ class AgentRunner:
                 max_turns=contract.limits.max_turns,
                 timeout_seconds=contract.limits.timeout_seconds,
                 max_retries=retries,
+                scope=scope,
+                resume=state,
+                save=self._saver(request.org_id, agent_run_id),
             )
         except ProviderRequestError as exc:
             raise ModelRequestRejectedError(str(exc)) from None
@@ -240,10 +251,23 @@ class AgentRunner:
         else:
             log.warning("agent.output_not_stored", agent=contract.key, status=stored.status, reason=stored.reason)
         log.info("agent.step_completed", agent=contract.key, attempts=attempts, tool_calls=scope.tool_calls)
-        return AgentStepResult(
+        result = AgentStepResult(
             status="blocked" if prepared.status(output) == "blocked" else "completed",
             summary=prepared.summary(output),
             output=payload,
             artifact_ids=artifact_ids,
             agent_run_id=agent_run_id,
         )
+        if self._checkpoints is not None:
+            await self._checkpoints.save(request.org_id, agent_run_id, {"result": result.model_dump(mode="json")})
+        return result
+
+    def _saver(self, org_id: UUID, agent_run_id: UUID) -> Any:
+        if self._checkpoints is None:
+            return None
+        checkpoints = self._checkpoints
+
+        async def save(state: dict[str, Any]) -> None:
+            await checkpoints.save(org_id, agent_run_id, state)
+
+        return save

@@ -17,6 +17,7 @@ from pydantic import BaseModel, ValidationError
 from aieos.agents.errors import AgentLimitError
 from aieos.core.logging import get_logger
 from aieos.providers.llm import (
+    AssistantMessage,
     ChatModel,
     ChatRequest,
     Message,
@@ -66,28 +67,55 @@ def _validation_summary(exc: ValidationError) -> str:
     return "\n".join(lines)
 
 
-async def run_agent(agent: AgentDefinition, message: str, *, model: ChatModel, max_turns: int) -> BaseModel:
+Checkpoint = Callable[[list[Message]], Awaitable[None]]
+
+
+async def run_agent(
+    agent: AgentDefinition,
+    message: str,
+    *,
+    model: ChatModel,
+    max_turns: int,
+    history: list[Message] | None = None,
+    checkpoint: Checkpoint | None = None,
+) -> BaseModel:
+    """Run the loop. With `history` (from a checkpoint) it continues where that run stopped: a last
+    assistant message whose tool calls have no results yet is executed without calling the model again.
+    `checkpoint` is called after every model reply (before its tools run) and after the tool results."""
     if SUBMIT_TOOL in agent.tools:
         raise ValueError(f"{SUBMIT_TOOL} is reserved")
     specs = (*(t.spec for t in agent.tools.values()), submit_spec(agent.output_type))
-    messages: list[Message] = [UserMessage(message)]
-    for turn in range(1, max_turns + 1):
-        response = await model.complete(
-            ChatRequest(
-                system=agent.system,
-                messages=tuple(messages),
-                tools=specs,
-                tool_choice="required",
-                temperature=agent.temperature,
-                max_output_tokens=agent.max_output_tokens,
+    messages: list[Message] = list(history) if history else [UserMessage(message)]
+    turn = sum(isinstance(m, AssistantMessage) for m in messages)
+    pending = isinstance(messages[-1], AssistantMessage)
+    while True:
+        stop_reason: str | None = None
+        if pending:
+            reply = messages[-1]
+            assert isinstance(reply, AssistantMessage)
+            pending = False
+        else:
+            if turn >= max_turns:
+                raise AgentLimitError(f"{agent.name} exceeded {max_turns} turns")
+            response = await model.complete(
+                ChatRequest(
+                    system=agent.system,
+                    messages=tuple(messages),
+                    tools=specs,
+                    tool_choice="required",
+                    temperature=agent.temperature,
+                    max_output_tokens=agent.max_output_tokens,
+                )
             )
-        )
-        reply = response.message
-        messages.append(reply)
+            turn += 1
+            reply, stop_reason = response.message, response.stop_reason
+            messages.append(reply)
+            if checkpoint is not None:
+                await checkpoint(messages)
         if not reply.tool_calls:
             hint = (
                 " Your reply was cut off by the output limit; be more concise."
-                if response.stop_reason in ("max_tokens", "length", "MAX_TOKENS")
+                if stop_reason in ("max_tokens", "length", "MAX_TOKENS")
                 else ""
             )
             messages.append(UserMessage(f"Respond by calling a tool. When finished, call {SUBMIT_TOOL}.{hint}"))
@@ -125,4 +153,5 @@ async def run_agent(agent: AgentDefinition, message: str, *, model: ChatModel, m
         if final is not None:
             return final
         messages.append(ToolResultsMessage(tuple(results)))
-    raise AgentLimitError(f"{agent.name} exceeded {max_turns} turns")
+        if checkpoint is not None:
+            await checkpoint(messages)

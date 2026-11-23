@@ -14,6 +14,7 @@ from pathlib import Path
 
 from temporalio.worker import Worker
 
+from aieos.agents.checkpoints import PostgresCheckpoints
 from aieos.agents.runner import AgentRunner
 from aieos.artifacts.store import ArtifactStore
 from aieos.core.logging import configure_logging, get_logger
@@ -65,6 +66,7 @@ async def _run(kind: str, engineering: Path) -> None:
             recorder=PostgresUsageRecorder(db),
             invoker=TemporalToolInvoker(client),
             engineering_dir=engineering,
+            checkpoints=PostgresCheckpoints(db),
         )
         acts = OrchestrationActivities(db, runner)
         worker = Worker(
