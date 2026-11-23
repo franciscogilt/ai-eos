@@ -38,6 +38,13 @@ class MeOut(BaseModel):
     subject: str
 
 
+class MyOrgOut(BaseModel):
+    id: UUID
+    slug: str
+    name: str
+    role: str
+
+
 class OrgOut(BaseModel):
     id: UUID
     slug: str
@@ -192,3 +199,66 @@ class ApprovalDecision(_In):
     decision: Literal["approve", "reject"]
     version: int = Field(ge=1)
     comment: str | None = Field(default=None, max_length=2000)
+
+
+class StepOut(BaseModel):
+    step_key: str
+    attempt: int
+    status: str
+    started_at: datetime | None
+    finished_at: datetime | None
+
+
+class TaskOut(BaseModel):
+    key: str
+    title: str
+    status: str
+    attempt: int
+    assigned_agent_key: str
+
+
+class GateOut(BaseModel):
+    gate_key: str
+    task_key: str | None
+    result: str
+    details: dict[str, Any]
+    evaluated_at: datetime
+
+
+class RunOut(BaseModel):
+    id: UUID
+    agent_key: str
+    step_key: str | None
+    step_attempt: int | None
+    model_provider: str
+    model_name: str
+    status: str
+    started_at: datetime
+    finished_at: datetime | None
+    input_tokens: int
+    output_tokens: int
+    cost_usd: Decimal
+
+
+class TimelineOut(BaseModel):
+    workflow: WorkflowOut
+    steps: list[StepOut]
+    tasks: list[TaskOut]
+    gates: list[GateOut]
+    runs: list[RunOut]
+
+
+class CostRow(BaseModel):
+    key: str
+    input_tokens: int
+    output_tokens: int
+    cost_usd: Decimal
+    calls: int
+
+
+class CostsOut(BaseModel):
+    days: int
+    total_usd: Decimal
+    by_day: list[CostRow]
+    by_agent: list[CostRow]
+    by_model: list[CostRow]
