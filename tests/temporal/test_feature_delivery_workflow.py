@@ -294,3 +294,47 @@ async def test_tool_bridge_runs_each_call_once(env: WorkflowEnvironment) -> None
         second = await invoker.invoke(request)
     assert first == second and first.status == "succeeded"
     assert len(fakes.tool_calls) == 1
+
+
+@pytest.mark.asyncio
+@bounded
+async def test_trace_context_crosses_temporal_into_the_gateway(env: WorkflowEnvironment) -> None:
+    """A span opened by the caller (agent worker) is the ancestor of the gateway activity's span."""
+    from opentelemetry import trace
+    from temporalio.client import Client
+
+    from aieos.observability.telemetry import span, temporal_interceptors
+    from aieos.orchestration.tool_bridge import TemporalToolInvoker, ToolCallWorkflow
+    from tests.tracing import SpanCapture
+
+    seen: list[int] = []
+
+    class TracingFakes(Fakes):
+        @activity.defn(name="execute_tool")
+        async def execute_tool(self, request: ToolRequest) -> ToolResult:
+            seen.append(trace.get_current_span().get_span_context().trace_id)
+            return ToolResult(status="succeeded", reason="ok", result={})
+
+    with SpanCapture() as cap:
+        config = env.client.config()
+        config["interceptors"] = temporal_interceptors()
+        client = Client(**config)
+        fakes = TracingFakes()
+        agent = Worker(client, task_queue=AGENT_QUEUE, workflows=[ToolCallWorkflow])
+        gateway = Worker(client, task_queue=GATEWAY_QUEUE, activities=fakes.gateway_activities())
+        request = ToolRequest(
+            org_id=uuid.uuid4(),
+            workflow_id=uuid.uuid4(),
+            agent_run_id=uuid.uuid4(),
+            tool_name="artifacts.read",
+            arguments={},
+            call_id="trace-1",
+        )
+        async with agent, gateway:
+            with span("agent.step") as parent:
+                result = await TemporalToolInvoker(client).invoke(request)
+                trace_id = parent.get_span_context().trace_id
+    assert result.status == "succeeded"
+    assert seen == [trace_id]
+    names = {s.name for s in cap.spans if s.context.trace_id == trace_id}
+    assert any(n.startswith("RunActivity:execute_tool") for n in names), names
