@@ -1,9 +1,7 @@
 # syntax=docker/dockerfile:1.7
-# Platform image: API, agent worker, migrations and admin tasks (target `runtime`, the default), and
-# the tool-gateway worker (target `gateway`, adds the Docker CLI for sandboxes).
+# Platform image: API, agent worker, tool gateway, migrations and admin tasks.
 # Build from the repository root:
 #   docker build -f infrastructure/docker/api.Dockerfile -t aieos-platform:local .
-#   docker build -f infrastructure/docker/api.Dockerfile --target gateway -t aieos-gateway:local .
 # REPLACE_WITH_DIGEST_PIN: pin both base images by digest before publishing to ECR.
 
 FROM python:3.12-slim AS build
@@ -34,17 +32,3 @@ EXPOSE 8000
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
   CMD ["python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2).status == 200 else 1)"]
 ENTRYPOINT ["aieos-api"]
-
-# Tool-gateway worker. It starts sandbox containers through the host's Docker socket, so it holds
-# the GitHub App key and host-level Docker access: run it only on the dedicated sandbox host.
-# The ECR credential helper lets the Docker CLI pull the sandbox image with the task role.
-FROM runtime AS gateway
-USER root
-RUN apt-get update \
- && apt-get install -y --no-install-recommends docker.io amazon-ecr-credential-helper \
- && rm -rf /var/lib/apt/lists/* \
- && mkdir -p /root/.docker \
- && printf '{"credsStore": "ecr-login"}\n' > /root/.docker/config.json
-HEALTHCHECK NONE
-ENTRYPOINT ["aieos-worker"]
-CMD ["gateway"]

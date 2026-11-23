@@ -37,7 +37,7 @@ from aieos.gateway.sandbox_handlers import apply_patch
 from aieos.integrations.github.app import GitHubApp, GitHubError, GitHubRepo, RepoRef
 from aieos.integrations.github.patch import FileChange, PatchRejectedError, net_changes, validate_patch
 from aieos.persistence.db import Database
-from aieos.sandbox.docker import DockerSandboxManager, SandboxError, SandboxKey
+from aieos.sandbox.base import SandboxError, SandboxKey, SandboxManager
 
 log = get_logger(__name__)
 
@@ -120,7 +120,7 @@ class GitHubTools:
         db: Database,
         app: GitHubApp,
         store: ArtifactStore,
-        sandboxes: DockerSandboxManager | None,
+        sandboxes: SandboxManager | None,
         *,
         cache_bytes: int = 2 * 1024 * 1024 * 1024,
     ) -> None:
@@ -386,7 +386,7 @@ class GitHubTools:
 
     async def _verify_base(
         self,
-        sandboxes: DockerSandboxManager,
+        sandboxes: SandboxManager,
         key: SandboxKey,
         changes: list[FileChange],
         repo: GitHubRepo,

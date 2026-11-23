@@ -17,7 +17,7 @@ from uuid import UUID
 from aieos.artifacts.store import ArtifactStore
 from aieos.gateway.handlers import Handler, ToolContext, ToolFailedError, ToolInputError
 from aieos.integrations.github.patch import PatchRejectedError, validate_patch
-from aieos.sandbox.docker import GIT_IDENTITY, DockerSandboxManager, SandboxError, SandboxKey, UnsafePathError
+from aieos.sandbox.base import GIT_IDENTITY, SandboxError, SandboxKey, SandboxManager, UnsafePathError
 
 DEFAULT_ALLOWED_COMMANDS = frozenset(
     {
@@ -78,7 +78,7 @@ def scan_added_lines(patch: str) -> list[dict[str, Any]]:
     return findings
 
 
-async def apply_patch(manager: DockerSandboxManager, key: SandboxKey, patch: bytes, *, what: str) -> None:
+async def apply_patch(manager: SandboxManager, key: SandboxKey, patch: bytes, *, what: str) -> None:
     """Validate and apply a platform patch artifact to the sandbox working tree (no commit)."""
     try:
         validate_patch(patch)
@@ -123,7 +123,7 @@ Snapshot = Callable[[ToolContext], Awaitable[bytes]]
 
 
 def sandbox_handlers(
-    manager: DockerSandboxManager,
+    manager: SandboxManager,
     store: ArtifactStore,
     *,
     allowed_commands: frozenset[str] = DEFAULT_ALLOWED_COMMANDS,

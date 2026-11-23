@@ -93,13 +93,28 @@ Jaeger `http://localhost:16686`.
 | GET, PATCH, DELETE | `/v1/orgs/{org_id}/projects/{project_id}` | PATCH needs the current `version` (409 if stale) |
 | GET, POST | `/v1/orgs/{org_id}/projects/{project_id}/repositories` | register: admin, owner |
 | POST | `/v1/orgs/{org_id}/projects/{project_id}/workflows` | member, admin, owner; idempotent by `idempotency_key` |
+| GET | `/v1/me/orgs` | authenticated; only the caller's own memberships |
 | GET | `/v1/orgs/{org_id}/workflows`, `/v1/orgs/{org_id}/workflows/{id}` | any member |
+| GET | `/v1/orgs/{org_id}/workflows/{id}/timeline` | any member; steps, tasks, gates, agent runs with cost |
+| GET | `/v1/orgs/{org_id}/costs?days=30` | any member; model spend by day, agent and model |
 | POST | `/v1/orgs/{org_id}/workflows/{id}/cancel`, `/clarifications` | creator, admin, owner |
 | GET | `/v1/orgs/{org_id}/approvals`, `/v1/orgs/{org_id}/approvals/{id}` | any member |
 | POST | `/v1/orgs/{org_id}/approvals/{id}/decision` | approver, owner (and in the project's `approver_roles`); four-eyes for Level 4 |
 
 User CLI: `AIEOS_API_URL`, `AIEOS_TOKEN`, `AIEOS_ORG` in the environment, then
 `aieos approvals list`, `aieos approvals approve <id>`, `aieos workflows show <id>`.
+
+### Web dashboard
+
+`/ui/` serves a small static page (no build step, no third-party code) to follow workflows, approve or
+reject pending steps and review costs. Sign-in is OIDC authorization code with PKCE in the browser:
+register a **public** client at your identity provider with redirect URI `https://<api-host>/ui/` and set
+`OIDC_UI_CLIENT_ID` (optionally `OIDC_UI_SCOPES`, `OIDC_UI_AUDIENCE`, and `OIDC_UI_EXTRA_ORIGINS` when the
+provider's token endpoint is on another origin than the issuer). The access token is kept in
+`sessionStorage` only. The page is served with a strict Content-Security-Policy (scripts and styles from
+this origin only; network calls only to the API and the identity provider; no framing). In `local`/`test`,
+or when no UI client is configured, the sign-in page also accepts a pasted token
+(`aieos-admin dev-token`).
 
 Organizations and memberships are provisioned only with `aieos-admin` (owner role), never through the API.
 

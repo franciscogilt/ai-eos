@@ -11,11 +11,11 @@ from temporalio.exceptions import ApplicationError
 
 from aieos.contracts.tools import ToolRequest, ToolResult
 from aieos.gateway.service import ToolGateway, ToolInProgressError
-from aieos.sandbox.docker import DockerSandboxManager
+from aieos.sandbox.base import SandboxManager
 
 
 class GatewayActivities:
-    def __init__(self, gateway: ToolGateway, sandboxes: DockerSandboxManager | None = None) -> None:
+    def __init__(self, gateway: ToolGateway, sandboxes: SandboxManager | None = None) -> None:
         self._gateway = gateway
         self._sandboxes = sandboxes
 
