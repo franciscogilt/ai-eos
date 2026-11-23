@@ -55,3 +55,11 @@ Options considered:
 - **ADR-0001 is unchanged in substance.** The loop still runs inside the `run_agent_step` activity. Its
   "revisit" note now means moving the loop's model and tool calls into individual activities ourselves,
   not adopting the OpenAI plugin.
+
+## Addendum (2026-11-22): console CLIs as providers
+- The owner develops with the CLIs they are already signed in to, without paying for APIs.
+- `kind: cli` drives Claude Code, Gemini CLI or Codex headless, as text models. It uses a JSON reply
+  protocol for tool calls (`adapters/text_protocol.py`) and runs each call in an empty temporary
+  directory with a reduced environment.
+- Ollama uses the existing `openai_compatible` adapter, with the API key now optional.
+- The agent loop and its guarantees are unchanged. Details: `docs/local-models.md`.

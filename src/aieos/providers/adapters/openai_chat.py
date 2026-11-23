@@ -90,7 +90,7 @@ class OpenAIChatModel:
         self,
         model: str,
         *,
-        api_key: str,
+        api_key: str | None,
         kind: str = "openai",
         base_url: str | None = None,
         timeout_seconds: float = 120.0,
@@ -103,7 +103,7 @@ class OpenAIChatModel:
         self._http = HttpTransport(
             provider=kind,
             base_url=base_url or DEFAULT_BASE_URL,
-            headers={"authorization": f"Bearer {api_key}"},
+            headers={"authorization": f"Bearer {api_key}"} if api_key else {},  # Ollama needs no key
             timeout_seconds=timeout_seconds,
             request_id_header="x-request-id",
             transport=transport,

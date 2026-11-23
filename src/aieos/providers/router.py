@@ -6,11 +6,13 @@ can switch it to another model."""
 from __future__ import annotations
 
 import os
+import shutil
 import time
 from collections.abc import Callable
 
 from aieos.contracts.agent_contract import AgentContract, ModelConfig, ModelRef
 from aieos.providers.adapters.anthropic import AnthropicChatModel
+from aieos.providers.adapters.cli import DEFAULT_COMMANDS, CliChatModel
 from aieos.providers.adapters.gemini import GeminiChatModel
 from aieos.providers.adapters.openai_chat import OpenAIChatModel
 from aieos.providers.circuit import CircuitBreaker
@@ -27,17 +29,25 @@ class ModelNotConfiguredError(RuntimeError):
 
 
 def http_model_factory(provider_name: str, cfg: ProviderConfig, model_name: str) -> ChatModel:
-    """Build the adapter for a provider's wire protocol. Keys come from the environment only."""
-    api_key = os.environ.get(cfg.api_key_env)
-    if not api_key:
+    """Build the adapter for a provider's protocol. Keys come from the environment only."""
+    timeout = cfg.timeout_seconds
+    if cfg.kind == "cli":
+        assert cfg.cli is not None
+        command = cfg.command or DEFAULT_COMMANDS[cfg.cli]
+        if shutil.which(os.path.expanduser(command)) is None:
+            raise ModelNotConfiguredError(f"provider {provider_name}: `{command}` is not installed or not on PATH")
+        return CliChatModel(cfg.cli, model_name, command=command, extra_args=cfg.extra_args, timeout_seconds=timeout)
+    api_key = os.environ.get(cfg.api_key_env) if cfg.api_key_env else None
+    if cfg.api_key_env and not api_key:
         raise ModelNotConfiguredError(f"provider {provider_name}: environment variable {cfg.api_key_env} is not set")
     base_url = os.environ.get(cfg.base_url_env) if cfg.base_url_env else None
     if cfg.kind == "openai_compatible" and not base_url:
         raise ModelNotConfiguredError(f"provider {provider_name}: {cfg.base_url_env} is not set")
-    timeout = cfg.timeout_seconds
     if cfg.kind == "anthropic":
+        assert api_key is not None
         return AnthropicChatModel(model_name, api_key=api_key, base_url=base_url, timeout_seconds=timeout)
     if cfg.kind == "gemini":
+        assert api_key is not None
         return GeminiChatModel(model_name, api_key=api_key, base_url=base_url, timeout_seconds=timeout)
     return OpenAIChatModel(model_name, api_key=api_key, kind=cfg.kind, base_url=base_url, timeout_seconds=timeout)
 
