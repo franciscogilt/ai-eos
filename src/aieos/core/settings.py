@@ -44,6 +44,12 @@ class Settings(BaseSettings):
     oidc_jwks_url: AnyHttpUrl | None = None
     oidc_jwks_path: Path | None = None
     oidc_algorithms: tuple[str, ...] = ("RS256", "ES256")
+    # Web dashboard (/ui): public OIDC client for the authorization-code + PKCE flow. Without a client id
+    # the dashboard offers only pasting a token (development).
+    oidc_ui_client_id: str | None = None
+    oidc_ui_scopes: str = "openid profile email"
+    oidc_ui_audience: str | None = None  # sent as `audience` to IdPs that need it (e.g. Auth0)
+    oidc_ui_extra_origins: str = ""  # comma-separated, e.g. a token endpoint on another host
 
     api_host: str = "127.0.0.1"
     api_port: int = Field(default=8000, ge=1, le=65_535)

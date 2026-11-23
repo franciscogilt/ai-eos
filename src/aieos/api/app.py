@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 from opentelemetry import trace
 
 from aieos import __version__
+from aieos.api import ui_routes
 from aieos.api.auth import TokenVerifier, jwks_file_resolver, jwks_url_resolver
 from aieos.api.routes import approvals, health, me, orgs, projects, repositories, workflows
 from aieos.core.errors import (
@@ -181,6 +182,7 @@ def create_app(
         repositories.router,
         workflows.router,
         approvals.router,
+        ui_routes.router,
     ):
         app.include_router(router)
     return app

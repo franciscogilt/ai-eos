@@ -1,7 +1,8 @@
-"""Feature-delivery workflows: create (idempotent), read, cancel, answer clarifications."""
+"""Feature-delivery workflows: create (idempotent), read, timeline, costs, cancel, answer clarifications."""
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -11,7 +12,19 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from aieos.api.deps import CurrentPrincipal, OrgContext, authorize_org, get_db
 from aieos.api.rbac import ROLE_PERMISSIONS, Permission
-from aieos.api.schemas import CancelRequest, ClarificationRequest, WorkflowCreate, WorkflowOut
+from aieos.api.schemas import (
+    CancelRequest,
+    ClarificationRequest,
+    CostRow,
+    CostsOut,
+    GateOut,
+    RunOut,
+    StepOut,
+    TaskOut,
+    TimelineOut,
+    WorkflowCreate,
+    WorkflowOut,
+)
 from aieos.core.errors import ConflictError, ForbiddenError, NotFoundError
 from aieos.core.ids import uuid7
 from aieos.orchestration.client import Orchestrator
@@ -205,3 +218,94 @@ async def answer_clarifications(
         row.temporal_workflow_id, ClarificationAnswers(answers=body.answers)
     )
     return {"status": "delivered"}
+
+
+@router.get("/workflows/{workflow_id}/timeline")
+async def workflow_timeline(
+    org_id: UUID, workflow_id: UUID, request: Request, principal: CurrentPrincipal
+) -> TimelineOut:
+    """Everything the dashboard shows for one workflow: steps, tasks, quality gates and agent runs with cost."""
+    async with get_db(request).tenant(org_id) as conn:
+        await authorize_org(conn, principal, Permission.WORKFLOW_READ)
+        workflow = _out(await _get(conn, workflow_id))
+        params = {"wf": workflow_id}
+        steps = await conn.execute(
+            text(
+                """SELECT step_key, attempt, status, started_at, finished_at FROM workflow_steps
+                   WHERE workflow_id = :wf ORDER BY sequence, attempt"""
+            ),
+            params,
+        )
+        tasks = await conn.execute(
+            text(
+                """SELECT key, title, status, attempt, assigned_agent_key FROM tasks
+                   WHERE workflow_id = :wf ORDER BY created_at, key"""
+            ),
+            params,
+        )
+        gates = await conn.execute(
+            text(
+                """SELECT g.gate_key, t.key AS task_key, g.result, g.details, g.evaluated_at
+                   FROM quality_gates g LEFT JOIN tasks t ON t.id = g.task_id
+                   WHERE g.workflow_id = :wf ORDER BY g.evaluated_at"""
+            ),
+            params,
+        )
+        runs = await conn.execute(
+            text(
+                """SELECT r.id, a.key AS agent_key, r.step_key, r.step_attempt, r.model_provider, r.model_name,
+                          r.status, r.started_at, r.finished_at,
+                          COALESCE(SUM(u.input_tokens), 0) AS input_tokens,
+                          COALESCE(SUM(u.output_tokens), 0) AS output_tokens,
+                          COALESCE(SUM(u.cost_usd), 0) AS cost_usd
+                   FROM agent_runs r
+                   JOIN agent_versions v ON v.id = r.agent_version_id
+                   JOIN agents a ON a.id = v.agent_id
+                   LEFT JOIN model_usage u ON u.agent_run_id = r.id
+                   WHERE r.workflow_id = :wf
+                   GROUP BY r.id, a.key ORDER BY r.started_at"""
+            ),
+            params,
+        )
+        return TimelineOut(
+            workflow=workflow,
+            steps=[StepOut(**r._mapping) for r in steps],
+            tasks=[TaskOut(**r._mapping) for r in tasks],
+            gates=[GateOut(**r._mapping) for r in gates],
+            runs=[RunOut(**r._mapping) for r in runs],
+        )
+
+
+@router.get("/costs")
+async def costs(
+    org_id: UUID,
+    request: Request,
+    principal: CurrentPrincipal,
+    days: Annotated[int, Query(ge=1, le=366)] = 30,
+) -> CostsOut:
+    """Model spend for the organization over the last `days` days, by day, agent and model."""
+    async with get_db(request).tenant(org_id) as conn:
+        await authorize_org(conn, principal, Permission.WORKFLOW_READ)
+
+        async def grouped(key_sql: str, joins: str = "") -> list[CostRow]:
+            rows = await conn.execute(
+                text(
+                    f"""SELECT {key_sql} AS key, SUM(u.input_tokens) AS input_tokens,
+                               SUM(u.output_tokens) AS output_tokens, SUM(u.cost_usd) AS cost_usd, COUNT(*) AS calls
+                        FROM model_usage u {joins}
+                        WHERE u.occurred_at >= now() - make_interval(days => :days)
+                        GROUP BY 1 ORDER BY 1"""
+                ),
+                {"days": days},
+            )
+            return [CostRow(**r._mapping) for r in rows]
+
+        by_day = await grouped("to_char(date_trunc('day', u.occurred_at), 'YYYY-MM-DD')")
+        by_agent = await grouped(
+            "a.key",
+            "JOIN agent_runs r ON r.id = u.agent_run_id JOIN agent_versions v ON v.id = r.agent_version_id "
+            "JOIN agents a ON a.id = v.agent_id",
+        )
+        by_model = await grouped("u.provider || '/' || u.model")
+        total = sum((r.cost_usd for r in by_day), start=Decimal(0))
+        return CostsOut(days=days, total_usd=total, by_day=by_day, by_agent=by_agent, by_model=by_model)
