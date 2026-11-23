@@ -1,0 +1,48 @@
+# Model routing for local development without API bills.
+# Use it with:  MODEL_ROUTING_PATH=engineering/model-routing.local.yaml   (in .env)
+#
+# The agent contracts name provider slots (anthropic, gemini, openai). Here each slot is the
+# coding CLI you are already signed in to on this machine, driven headless by AI-EOS:
+#   anthropic -> Claude Code (`claude`)   used by requirements, architecture, developer, supervisor
+#   gemini    -> Gemini CLI (`gemini`)    used by qa_security (a different model family, for independent review)
+#   openai    -> Codex (`codex`)          not used by default; swap it into a slot below if you prefer
+# Run the agent worker on your machine (where the CLIs are installed and signed in).
+# Prices are 0 because you pay through your plans, not per token; token limits in each contract
+# and in the workflow budget still apply.
+api_version: aieos/v1
+
+providers:
+  anthropic:
+    kind: cli
+    cli: claude_code
+    timeout_seconds: 600
+  gemini:
+    kind: cli
+    cli: gemini_cli
+    timeout_seconds: 600
+  openai:
+    kind: cli
+    cli: codex_cli
+    timeout_seconds: 600
+  # A model on your own machine through Ollama (fully offline). To use it for an agent, point that
+  # agent's slot here instead, e.g. replace the `gemini` block above with:
+  #   gemini: {kind: openai_compatible, base_url_env: OLLAMA_BASE_URL, timeout_seconds: 600}
+  # and set OLLAMA_BASE_URL=http://localhost:11434/v1 plus a model id under `models` (e.g. qwen2.5-coder:14b).
+  ollama:
+    kind: openai_compatible
+    base_url_env: OLLAMA_BASE_URL
+    timeout_seconds: 600
+
+# `default` = whatever model each CLI is configured to use. Put a CLI model name here to pin one.
+models:
+  anthropic: {reasoning_high: default, reasoning_standard: default, fast: default}
+  gemini: {reasoning_high: default, reasoning_standard: default, fast: default}
+  openai: {reasoning_high: default, reasoning_standard: default, fast: default}
+
+pricing:
+  anthropic/default: {input_per_mtok: 0, cached_input_per_mtok: 0, output_per_mtok: 0}
+  gemini/default: {input_per_mtok: 0, cached_input_per_mtok: 0, output_per_mtok: 0}
+  openai/default: {input_per_mtok: 0, cached_input_per_mtok: 0, output_per_mtok: 0}
+
+circuit_breaker_failures: 3
+circuit_breaker_reset_seconds: 60

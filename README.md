@@ -21,6 +21,10 @@ golden set against the configured real models with a hard spending cap (also ava
 manual `agent-evals` GitHub Actions workflow).
 
 ### Before any agent can call a model
+**No API bills:** set `MODEL_ROUTING_PATH=engineering/model-routing.local.yaml` to use the coding CLIs you are
+already signed in to (Claude Code, Gemini CLI, Codex) or Ollama. See `docs/local-models.md`.
+
+With API keys instead:
 Fill in `engineering/model-routing.yaml`: a model id per provider and profile under
 `models`, and a price for each of those models under `pricing` (copied from the
 provider's current price list). Unpriced or placeholder models are refused, so a

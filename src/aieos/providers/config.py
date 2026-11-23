@@ -28,18 +28,29 @@ class _Strict(BaseModel):
 class ProviderConfig(_Strict):
     # Wire protocol. anthropic: Messages API. gemini: Gemini generateContent. openai: OpenAI Chat
     # Completions. openai_compatible: the same protocol at base_url (gateways, vLLM, Ollama, ...).
-    kind: Literal["anthropic", "gemini", "openai", "openai_compatible"]
-    api_key_env: str = Field(pattern=r"^[A-Z][A-Z0-9_]*$")
+    # cli: a coding CLI already signed in on this machine (Claude Code, Gemini CLI, Codex), used
+    # as a plain text model; see adapters/cli.py.
+    kind: Literal["anthropic", "gemini", "openai", "openai_compatible", "cli"]
+    # Required for the hosted APIs; optional for openai_compatible (Ollama needs none); unused for cli.
+    api_key_env: str | None = Field(default=None, pattern=r"^[A-Z][A-Z0-9_]*$")
     # Optional for the hosted vendors (overrides their public endpoint); required for openai_compatible.
     base_url_env: str | None = Field(default=None, pattern=r"^[A-Z][A-Z0-9_]*$")
     timeout_seconds: float = Field(default=120.0, gt=0, le=900)
     # Some reasoning models reject a temperature parameter; set false for those.
     send_temperature: bool = True
+    # kind: cli only.
+    cli: Literal["claude_code", "gemini_cli", "codex_cli"] | None = None
+    command: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_./~-]+$")  # binary; default: the CLI's name
+    extra_args: tuple[str, ...] = ()  # appended to the CLI's arguments, for flags your version needs
 
     @model_validator(mode="after")
-    def _compatible_needs_url(self) -> ProviderConfig:
+    def _consistent(self) -> ProviderConfig:
         if self.kind == "openai_compatible" and not self.base_url_env:
             raise ValueError("openai_compatible providers need base_url_env")
+        if self.kind in ("anthropic", "gemini", "openai") and not self.api_key_env:
+            raise ValueError(f"{self.kind} providers need api_key_env")
+        if (self.kind == "cli") != (self.cli is not None):
+            raise ValueError("set `cli` exactly when kind is cli")
         return self
 
 
