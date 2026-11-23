@@ -42,7 +42,8 @@ To use another tool for an agent, edit that slot. For example, point `gemini` at
 ## Limits
 - **Verification.** The CLI adapters are tested against stand-ins that follow each CLI's documented
   headless output, not against the real CLIs. Before relying on one, run a single eval on your machine:
-  `MODEL_ROUTING_PATH=engineering/model-routing.local.yaml make eval`.
+  `MODEL_ROUTING_PATH=engineering/model-routing.local.yaml make eval` (or, without make:
+  `uv run aieos-eval --agent requirements --cases engineering/evals/requirements --routing engineering/model-routing.local.yaml`).
 - **Reply format.** Text-based tool calling is less reliable than native tool calls. Expect more
   "please reply with JSON" retries than with the APIs.
 - **Gemini CLI.** Since 2026-06-18 Gemini CLI no longer serves free, Google AI Pro or Ultra accounts;
