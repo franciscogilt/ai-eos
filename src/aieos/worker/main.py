@@ -25,6 +25,7 @@ from aieos.core.settings import (
     Settings,
     StorageSettings,
     TemporalSettings,
+    sandbox_token_secret,
 )
 from aieos.gateway.activities import GatewayActivities
 from aieos.gateway.catalog import load_catalog
@@ -41,7 +42,9 @@ from aieos.persistence.db import Database
 from aieos.providers.config import load_routing_config
 from aieos.providers.metering import PostgresUsageRecorder
 from aieos.providers.router import ModelRouter
-from aieos.sandbox.docker import DockerCLI, DockerSandboxManager, SandboxLimits
+from aieos.sandbox.base import SandboxLimits, SandboxManager
+from aieos.sandbox.docker import DockerCLI, DockerSandboxManager
+from aieos.sandbox.fargate import FargateSandboxManager
 
 log = get_logger("aieos.worker")
 
@@ -76,18 +79,34 @@ async def _run(kind: str, engineering: Path) -> None:
         store = ArtifactStore.from_settings(db, StorageSettings())
         handlers = artifact_handlers(store)
         sandbox_settings = SandboxSettings()
-        sandboxes = None
+        sandboxes: SandboxManager | None = None
+        limits = SandboxLimits(
+            cpus=sandbox_settings.sandbox_default_cpus,
+            memory_mb=sandbox_settings.sandbox_default_memory_mb,
+            command_timeout_seconds=sandbox_settings.sandbox_default_timeout_seconds,
+        )
         if sandbox_settings.sandbox_backend == "docker":
             sandboxes = DockerSandboxManager(
                 DockerCLI(),
                 image=sandbox_settings.sandbox_image,
                 runtime=sandbox_settings.sandbox_runtime,
-                limits=SandboxLimits(
-                    cpus=sandbox_settings.sandbox_default_cpus,
-                    memory_mb=sandbox_settings.sandbox_default_memory_mb,
-                    command_timeout_seconds=sandbox_settings.sandbox_default_timeout_seconds,
-                ),
+                limits=limits,
             )
+        elif sandbox_settings.sandbox_backend == "fargate":
+            import boto3
+
+            if not (sandbox_settings.sandbox_ecs_cluster and sandbox_settings.sandbox_task_definition):
+                raise SystemExit("SANDBOX_ECS_CLUSTER and SANDBOX_TASK_DEFINITION are required for fargate")
+            sandboxes = FargateSandboxManager(
+                boto3.client("ecs"),
+                cluster=sandbox_settings.sandbox_ecs_cluster,
+                task_definition=sandbox_settings.sandbox_task_definition,
+                subnets=[x for x in sandbox_settings.sandbox_subnets.split(",") if x],
+                security_groups=[x for x in sandbox_settings.sandbox_security_groups.split(",") if x],
+                token_secret=sandbox_token_secret(sandbox_settings),
+                limits=limits,
+            )
+        if sandboxes is not None:
             await sandboxes.reap(older_than_seconds=sandbox_settings.sandbox_max_age_seconds)
         github_settings = GitHubSettings()
         github: GitHubTools | None = None
