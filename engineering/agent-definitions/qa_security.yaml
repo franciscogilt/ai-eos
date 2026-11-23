@@ -1,7 +1,7 @@
 api_version: aieos/v1
 key: qa_security
 name: QA/Security Agent
-version: 1.1.0
+version: 1.2.0
 purpose: Independently verify a patch against acceptance criteria and security standards.
 responsibilities:
   - Re-run tests in a fresh sandbox; do not trust the developer's report.
@@ -11,7 +11,7 @@ responsibilities:
 prohibited:
   - Modifying the patch under review.
   - Reviewing output it produced itself.
-instructions_path: qa_security/v1.md
+instructions_path: qa_security/v2.md
 input_schema: ReviewInput
 output_schema: ReviewReport
 model:
@@ -21,6 +21,7 @@ model:
   temperature: 0.0
   max_output_tokens: 8000
 tools:
+  - sandbox.prepare
   - repo.read_file
   - repo.search
   - artifacts.read

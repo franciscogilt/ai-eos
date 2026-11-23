@@ -117,7 +117,7 @@ def _strict(schema: dict[str, Any]) -> bool:
 
 def test_every_model_facing_tool_has_a_strict_schema(catalog):
     for tool in catalog.tools:
-        if tool.executes_in == "orchestrator":
+        if tool.executes_in == "orchestrator" or not tool.model_visible:
             continue
         assert _strict(TOOL_ARG_SCHEMAS[tool.name]), tool.name
 

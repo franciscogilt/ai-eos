@@ -58,7 +58,7 @@ class Fakes:
         output = {
             "requirements": {"open_questions": []},
             "architecture": {"tasks": [{"key": "T-1", "title": "Only task"}]},
-            "developer": {"patch_artifact_id": "p"},
+            "developer": {"status": "implemented", "patch": {"artifact_id": "p"}},
             "qa_security": {"verdict": "approve"},
         }[request.agent_key]
         return AgentStepResult(status="completed", summary="ok", output=output, agent_run_id=uuid.uuid4())
@@ -174,6 +174,7 @@ async def test_happy_path_with_approval_signal(env: WorkflowEnvironment) -> None
         outcome = await handle.result()
     assert outcome.status == "succeeded" and outcome.pull_request == {"number": 42}
     assert [c.tool_name for c in fakes.tool_calls] == [
+        "github.push_branch",
         "github.create_pull_request",
         "github.merge_pull_request",
         "github.merge_pull_request",

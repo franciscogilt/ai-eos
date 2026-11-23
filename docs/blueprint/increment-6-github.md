@@ -64,8 +64,6 @@ Pushes exactly the patch artifact that was reviewed:
 | `tests/integration/test_github_workflow_repo.py` | Base commit pinned once, the trigger, tenant isolation | CI |
 
 ## Not in this increment
-- **Several tasks on one branch.** Each task's patch is made against the base commit, so pushing a second
-  task to the same branch replaces the first. B15 must seed each task's sandbox with the approved patches
-  of earlier tasks, then push the combined change.
+- **Several tasks on one branch:** done in Increment 7. Sandboxes stack approved patches, and the push applies them in order.
 - **`github.merge_pull_request` and `github.comment`** still have no handler; they fail with "no handler".
 - **Snapshots in S3.** The worker downloads them again after a restart.

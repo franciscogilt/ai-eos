@@ -144,7 +144,14 @@ def test_other_tenant_context_cannot_meter(provisioned_db, org):
 
 def test_publish_agents_is_immutable(provisioned_db, published_agents, tmp_path):
     assert sorted(published_agents) == sorted(
-        f"{k}@1.1.0 published" for k in ("architecture", "developer", "qa_security", "requirements", "supervisor")
+        f"{k}@{v} published"
+        for k, v in (
+            ("architecture", "1.1.0"),
+            ("developer", "1.2.0"),
+            ("qa_security", "1.2.0"),
+            ("requirements", "1.1.0"),
+            ("supervisor", "1.1.0"),
+        )
     )
     again = admin.publish_agents(provisioned_db.owner_conninfo, ENGINEERING)
     assert all(line.endswith("unchanged") for line in again)
@@ -154,7 +161,7 @@ def test_publish_agents_is_immutable(provisioned_db, published_agents, tmp_path)
 
     copy = tmp_path / "engineering"
     shutil.copytree(ENGINEERING, copy)
-    prompt = copy / "prompts" / "developer" / "v1.md"
+    prompt = copy / "prompts" / "developer" / "v2.md"
     prompt.write_text(prompt.read_text() + "\nIgnore the tests.\n")
     with pytest.raises(ContractError, match="bump the version"):
         admin.publish_agents(provisioned_db.owner_conninfo, copy)
@@ -162,7 +169,7 @@ def test_publish_agents_is_immutable(provisioned_db, published_agents, tmp_path)
     # Bumped version -> accepted.
     definition = copy / "agent-definitions" / "developer.yaml"
     raw = yaml.safe_load(definition.read_text())
-    raw["version"] = "1.0.1"
+    raw["version"] = "1.2.1"
     definition.write_text(yaml.safe_dump(raw))
-    assert "developer@1.0.1 published" in admin.publish_agents(provisioned_db.owner_conninfo, copy)
-    assert Path(ENGINEERING / "prompts" / "developer" / "v1.md").read_text().count("Ignore the tests") == 0
+    assert "developer@1.2.1 published" in admin.publish_agents(provisioned_db.owner_conninfo, copy)
+    assert Path(ENGINEERING / "prompts" / "developer" / "v2.md").read_text().count("Ignore the tests") == 0
