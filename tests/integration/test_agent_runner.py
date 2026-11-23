@@ -13,7 +13,7 @@ import pytest
 from moto import mock_aws
 from temporalio.exceptions import ApplicationError
 
-from aieos.agents.runner import SdkAgentRunner
+from aieos.agents.runner import AgentRunner
 from aieos.artifacts.store import ArtifactStore, build_s3_client
 from aieos.cli import admin
 from aieos.contracts.steps import AgentStepRequest
@@ -63,7 +63,7 @@ def run_step(
                 catalog = load_catalog(engineering / "tool-catalog.yaml")
                 store = ArtifactStore(db, s3, bucket=BUCKET)
                 gateway = ToolGateway(db, catalog, artifact_handlers(store))
-                runner = SdkAgentRunner(
+                runner = AgentRunner(
                     db,
                     router=ModelRouter(routing_cfg or routing(), model_factory=lambda *_: fake),
                     recorder=PostgresUsageRecorder(db),

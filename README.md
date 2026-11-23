@@ -9,8 +9,8 @@ human approval at sensitive steps and a complete audit trail.
 router: the Temporal `FeatureDeliveryWorkflow` (requirements → clarification →
 architecture → plan → develop/review per task → PR → merge approval), the tool-gateway
 worker that authorizes every tool call, and human approvals through the API and CLI.
-**B14:** the Requirements and Architecture agents run for real (OpenAI Agents SDK, metered,
-grounding-checked). Developer and QA/Security agents (B15) and GitHub/sandbox tools (B13)
+**B14:** the Requirements and Architecture agents run for real (our own provider-neutral agent loop
+over Anthropic, Gemini, OpenAI or any OpenAI-compatible server; metered, grounding-checked; ADR-0002). Developer and QA/Security agents (B15) and GitHub/sandbox tools (B13)
 are next; until then those steps fail fast with `AgentNotAvailable`. See `docs/blueprint/`.
 
 ### Evaluating agents
@@ -22,8 +22,9 @@ manual `agent-evals` GitHub Actions workflow).
 Fill in `engineering/model-routing.yaml`: a model id per provider and profile under
 `models`, and a price for each of those models under `pricing` (copied from the
 provider's current price list). Unpriced or placeholder models are refused, so a
-budget can never be bypassed. Then set `OPENAI_API_KEY` and the second provider's
-`SECONDARY_PROVIDER_BASE_URL` / `SECONDARY_PROVIDER_API_KEY` in `.env`.
+budget can never be bypassed. Then set the API key of each provider you use (`ANTHROPIC_API_KEY`,
+`GEMINI_API_KEY`, `OPENAI_API_KEY`, or a local OpenAI-compatible server) in `.env`. No provider is
+required; agent contracts name a provider slot and the routing file decides what sits behind it.
 
 ## Layout
 

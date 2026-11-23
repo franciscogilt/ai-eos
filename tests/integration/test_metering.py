@@ -144,7 +144,7 @@ def test_other_tenant_context_cannot_meter(provisioned_db, org):
 
 def test_publish_agents_is_immutable(provisioned_db, published_agents, tmp_path):
     assert sorted(published_agents) == sorted(
-        f"{k}@1.0.0 published" for k in ("architecture", "developer", "qa_security", "requirements", "supervisor")
+        f"{k}@1.1.0 published" for k in ("architecture", "developer", "qa_security", "requirements", "supervisor")
     )
     again = admin.publish_agents(provisioned_db.owner_conninfo, ENGINEERING)
     assert all(line.endswith("unchanged") for line in again)

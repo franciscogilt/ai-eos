@@ -2,62 +2,78 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
-from agents.items import ModelResponse
-from agents.models.interface import Model
-from agents.usage import Usage
-from openai.types.responses import ResponseOutputMessage, ResponseOutputText
-from openai.types.responses.response_usage import InputTokensDetails
-
+from aieos.agents.loop import SUBMIT_TOOL
+from aieos.providers.llm import (
+    AssistantMessage,
+    ChatRequest,
+    ChatResponse,
+    ToolCall,
+    ToolResultsMessage,
+    UserMessage,
+)
 from aieos.providers.metering import BudgetExceededError, BudgetStatus, MeteringContext
 from aieos.providers.pricing import TokenUsage
 
 
 def response(
-    text: str = "ok", *, inp: int = 1000, cached: int = 0, cache_write: int = 0, out: int = 200, rid: str = "req-1"
-) -> ModelResponse:
-    message = ResponseOutputMessage(
-        id="msg_1",
-        type="message",
-        role="assistant",
-        status="completed",
-        content=[ResponseOutputText(type="output_text", text=text, annotations=[])],
+    text: str = "ok",
+    *,
+    inp: int = 1000,
+    cached: int = 0,
+    cache_write: int = 0,
+    out: int = 200,
+    rid: str = "req-1",
+    calls: tuple[ToolCall, ...] = (),
+    stop: str | None = "end_turn",
+) -> ChatResponse:
+    return ChatResponse(
+        message=AssistantMessage(text=text, tool_calls=calls, provider="fake"),
+        usage=TokenUsage(inp, cached, out, cache_write),
+        request_id=rid,
+        stop_reason=stop,
     )
-    usage = Usage(
-        requests=1,
-        input_tokens=inp,
-        output_tokens=out,
-        total_tokens=inp + out,
-        input_tokens_details=InputTokensDetails(cached_tokens=cached, cache_write_tokens=cache_write),
-    )
-    return ModelResponse(output=[message], usage=usage, response_id=f"resp-{rid}", request_id=rid)
 
 
-class FakeModel(Model):
+class FakeModel:
     """Returns queued results in order; an Exception in the queue is raised.
-    Records the system instructions and input of every call."""
+    Records every request it receives."""
 
     def __init__(self, *results: Any) -> None:
         self.results = list(results)
         self.calls = 0
-        self.instructions: list[Any] = []
-        self.inputs: list[Any] = []
+        self.requests: list[ChatRequest] = []
 
-    async def get_response(self, *args: Any, **kwargs: Any) -> ModelResponse:
+    @property
+    def instructions(self) -> list[str]:
+        return [r.system for r in self.requests]
+
+    @property
+    def inputs(self) -> list[ChatRequest]:
+        return self.requests
+
+    async def complete(self, request: ChatRequest) -> ChatResponse:
         self.calls += 1
-        if args:
-            self.instructions.append(args[0])
-            self.inputs.append(args[1])
+        self.requests.append(request)
         result = self.results.pop(0) if self.results else response(rid=f"auto-{self.calls}")
         if isinstance(result, Exception):
             raise result
         return result
 
-    def stream_response(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError
+
+def text_of(request: ChatRequest) -> str:
+    """All text a model would see in a request's conversation (user text and tool results)."""
+    parts: list[str] = []
+    for m in request.messages:
+        if isinstance(m, (UserMessage, AssistantMessage)):
+            parts.append(m.text)
+        elif isinstance(m, ToolResultsMessage):
+            parts.extend(r.content for r in m.results)
+    return "\n".join(parts)
 
 
 @dataclass
@@ -87,31 +103,15 @@ class MemoryRecorder:
         )
 
 
-def function_call(name: str, arguments: dict[str, Any], call_id: str = "call_1", rid: str = "fc") -> ModelResponse:
-    from openai.types.responses import ResponseFunctionToolCall
-
-    item = ResponseFunctionToolCall(
-        type="function_call",
-        call_id=call_id,
-        name=name.replace(".", "__"),
-        arguments=__import__("json").dumps(arguments),
-        id=f"fc_{call_id}",
-        status="completed",
-    )
-    usage = Usage(
-        requests=1,
-        input_tokens=100,
-        output_tokens=20,
-        total_tokens=120,
-        input_tokens_details=InputTokensDetails(cached_tokens=0, cache_write_tokens=0),
-    )
-    return ModelResponse(output=[item], usage=usage, response_id=f"resp-{rid}-{call_id}", request_id=f"{rid}-{call_id}")
+def function_call(name: str, arguments: dict[str, Any], call_id: str = "call_1", rid: str = "fc") -> ChatResponse:
+    call = ToolCall(id=call_id, name=name.replace(".", "__"), arguments=arguments)
+    return response("", inp=100, out=20, rid=f"{rid}-{call_id}", calls=(call,), stop="tool_use")
 
 
-def json_output(payload: Any, rid: str = "out") -> ModelResponse:
-    import json
-
-    return response(json.dumps(payload), rid=rid)
+def json_output(payload: Any, rid: str = "out") -> ChatResponse:
+    """The model's final answer: a submit_output call carrying the payload."""
+    args = payload if isinstance(payload, dict) else {"value": payload}
+    return function_call(SUBMIT_TOOL, json.loads(json.dumps(args)), call_id=f"submit-{rid}", rid=rid)
 
 
 REQUEST = "On the Reports page, add an Export CSV button. Exports must respect report permissions."

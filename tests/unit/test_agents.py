@@ -1,4 +1,4 @@
-"""Agent factory, grounding and retry behaviour, driven through the real Agents SDK runner with fake models."""
+"""Agent factory, loop, grounding and retry behaviour, driven through the real agent loop with fake models."""
 
 from __future__ import annotations
 
@@ -9,14 +9,24 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
-from agents.strict_schema import ensure_strict_json_schema
 from tests.conftest import ENGINEERING
-from tests.fakes import REQUEST, FakeModel, MemoryRecorder, design_payload, function_call, json_output, spec_payload
+from tests.fakes import (
+    REQUEST,
+    FakeModel,
+    MemoryRecorder,
+    design_payload,
+    function_call,
+    json_output,
+    response,
+    spec_payload,
+    text_of,
+)
 from tests.unit.test_providers import routing
 
 from aieos.agents.errors import AgentLimitError, AgentOutputRejectedError
-from aieos.agents.factory import RunScope, build_agent, run_with_retries, sdk_tool_name
+from aieos.agents.factory import RunScope, build_agent, run_with_retries, wire_tool_name
 from aieos.agents.grounding import architecture_violations, requirement_grounding_violations
+from aieos.agents.loop import SUBMIT_TOOL, AgentDefinition, run_agent
 from aieos.agents.registry import load_all
 from aieos.agents.runner import prepare_architecture, prepare_requirements
 from aieos.agents.untrusted import wrap_untrusted
@@ -31,13 +41,6 @@ from aieos.providers.router import ModelRouter
 @pytest.fixture(scope="module")
 def loaded(definitions_dir, prompts_dir, catalog):
     return load_all(definitions_dir, prompts_dir=prompts_dir, catalog=catalog)
-
-
-def text_of(model_input: Any) -> str:
-    """The SDK passes either a string or a list of input items; return all text content."""
-    if isinstance(model_input, str):
-        return model_input
-    return "\n".join(str(item.get("content", item.get("output", ""))) for item in model_input if isinstance(item, dict))
 
 
 class RecordingInvoker:
@@ -80,7 +83,7 @@ def run_requirements(
         run_max_cost_usd=Decimal("5"),
         run_max_tokens=10**6,
     )
-    provider = ModelRouter(routing(), model_factory=lambda *_: fake).provider_for_run(contract, ctx, MemoryRecorder())
+    model = ModelRouter(routing(), model_factory=lambda *_: fake).model_for_run(contract, ctx, MemoryRecorder())
 
     def make(attempt: int):
         sc.attempt = attempt
@@ -92,7 +95,7 @@ def run_requirements(
         run_with_retries(
             make,
             prepared.message,
-            provider=provider,
+            model=model,
             output_type=RequirementsSpec,
             validate=prepared.validate,
             max_turns=max_turns,
@@ -103,12 +106,20 @@ def run_requirements(
 
 
 # ------------------------------------------------------------------ building blocks
+def _strict(schema: dict[str, Any]) -> bool:
+    if schema.get("type") == "object" or "properties" in schema:
+        props = schema.get("properties", {})
+        if schema.get("additionalProperties") is not False or set(schema.get("required", [])) != set(props):
+            return False
+        return all(_strict(v) for v in props.values())
+    return "$ref" not in schema
+
+
 def test_every_model_facing_tool_has_a_strict_schema(catalog):
     for tool in catalog.tools:
         if tool.executes_in == "orchestrator":
             continue
-        schema = TOOL_ARG_SCHEMAS[tool.name]
-        assert ensure_strict_json_schema(json.loads(json.dumps(schema))) == schema, tool.name
+        assert _strict(TOOL_ARG_SCHEMAS[tool.name]), tool.name
 
 
 def test_untrusted_wrapper_cannot_be_closed_early():
@@ -154,13 +165,13 @@ def test_factory_grants_only_contract_tools(loaded, catalog):
     sup = build_agent(
         loaded["supervisor"], catalog=catalog, invoker=RecordingInvoker(), scope=scope(), output_type=RequirementsSpec
     )
-    names = {t.name for t in sup.tools}
-    assert names == {sdk_tool_name("artifacts.read"), sdk_tool_name("github.create_pull_request")}  # no ask_user
+    names = set(sup.tools)
+    assert names == {wire_tool_name("artifacts.read"), wire_tool_name("github.create_pull_request")}  # no ask_user
     req = build_agent(
         loaded["requirements"], catalog=catalog, invoker=RecordingInvoker(), scope=scope(), output_type=RequirementsSpec
     )
-    assert "Untrusted content rule" in req.instructions and "requirements@1.0.0" in req.instructions
-    assert not any("sandbox" in t.name for t in req.tools)
+    assert "Untrusted content rule" in req.system and "requirements@1.1.0" in req.system
+    assert not any("sandbox" in name for name in req.tools)
 
 
 # ------------------------------------------------------------------ running
@@ -178,8 +189,7 @@ def test_tool_call_goes_to_gateway_and_result_is_wrapped(loaded, catalog):
     run_requirements(loaded, catalog, fake, invoker=invoker, sc=sc)
     (call,) = invoker.requests
     assert call.tool_name == "artifacts.read" and call.call_id == "a1-t1" and call.agent_run_id == sc.agent_run_id
-    second_input = json.dumps(fake.inputs[1], default=str)
-    assert 'untrusted source=\\"tool:artifacts.read\\"' in second_input
+    assert 'untrusted source="tool:artifacts.read"' in text_of(fake.inputs[1])
 
 
 def test_ungrounded_output_is_retried_with_feedback(loaded, catalog):
@@ -195,12 +205,48 @@ def test_persistently_ungrounded_output_is_rejected(loaded, catalog):
         run_requirements(loaded, catalog, FakeModel(bad, bad, bad), max_retries=2)
 
 
-def test_invalid_json_is_retried(loaded, catalog):
-    from tests.fakes import response
-
-    fake = FakeModel(response("not json at all"), json_output(spec_payload()))
+def test_schema_violation_is_fixed_inside_the_run(loaded, catalog):
+    bad = spec_payload()
+    del bad["requirements"]
+    fake = FakeModel(json_output(bad, rid="bad"), json_output(spec_payload()))
     _, attempts = run_requirements(loaded, catalog, fake)
-    assert attempts == 2 and "required schema" in text_of(fake.inputs[1])
+    assert attempts == 1 and fake.calls == 2
+    assert "does not match the schema" in text_of(fake.inputs[1]) and "requirements" in text_of(fake.inputs[1])
+
+
+def test_plain_text_reply_is_nudged_to_use_tools(loaded, catalog):
+    fake = FakeModel(response("Here is my answer in prose"), json_output(spec_payload()))
+    _, attempts = run_requirements(loaded, catalog, fake)
+    assert attempts == 1 and f"call {SUBMIT_TOOL}" in text_of(fake.inputs[1])
+
+
+def test_unknown_tool_and_bad_arguments_are_reported_not_executed(loaded, catalog):
+    from aieos.providers.llm import ToolCall
+
+    calls = (
+        ToolCall(id="u1", name="sandbox__run_command", arguments={"command": "rm -rf /"}),
+        ToolCall(id="u2", name="artifacts__read", arguments={}, arguments_error="arguments are not valid JSON"),
+    )
+    invoker = RecordingInvoker()
+    fake = FakeModel(response("", calls=calls), json_output(spec_payload()))
+    run_requirements(loaded, catalog, fake, invoker=invoker)
+    assert invoker.requests == []
+    seen = text_of(fake.inputs[1])
+    assert "Unknown tool 'sandbox__run_command'" in seen and "not valid JSON" in seen
+
+
+def test_every_request_requires_a_tool_and_offers_submit(loaded, catalog):
+    fake = FakeModel(json_output(spec_payload()))
+    run_requirements(loaded, catalog, fake)
+    req = fake.requests[0]
+    assert req.tool_choice == "required" and req.tools[-1].name == SUBMIT_TOOL
+    assert "$ref" not in json.dumps(req.tools[-1].parameters)  # inlined for every vendor
+
+
+def test_submit_tool_name_is_reserved():
+    agent = AgentDefinition(name="x", system="s", output_type=RequirementsSpec, tools={SUBMIT_TOOL: None})  # type: ignore[dict-item]
+    with pytest.raises(ValueError, match="reserved"):
+        asyncio.run(run_agent(agent, "hi", model=FakeModel(), max_turns=1))
 
 
 def test_tool_call_limit(loaded, catalog):
@@ -212,7 +258,7 @@ def test_tool_call_limit(loaded, catalog):
     )
     run_requirements(loaded, catalog, fake, invoker=invoker, sc=scope(max_tool_calls=1))
     assert len(invoker.requests) == 1
-    assert "Tool call limit" in json.dumps(fake.inputs[2], default=str)
+    assert "Tool call limit" in text_of(fake.inputs[2])
 
 
 def test_turn_limit(loaded, catalog):

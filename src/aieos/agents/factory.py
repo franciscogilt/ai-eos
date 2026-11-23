@@ -1,8 +1,9 @@
-"""Build OpenAI Agents SDK agents from published contracts, and run them with retries.
+"""Build agents from published contracts, and run them with grounding retries.
 
 Each agent gets exactly the tools its contract grants (minus orchestrator-only tools), as
-function tools whose invocation goes to the tool gateway. The model never calls a tool
-directly, and every result it sees is wrapped as untrusted data.
+tools whose invocation goes to the tool gateway. The model never calls a tool directly,
+and every result it sees is wrapped as untrusted data. Model access is provider-neutral
+(`aieos.providers.llm`); see ADR-0002.
 """
 
 from __future__ import annotations
@@ -14,19 +15,17 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 from uuid import UUID
 
-from agents import Agent, AgentOutputSchema, FunctionTool, ModelSettings, RunConfig, Runner
-from agents.exceptions import MaxTurnsExceeded, ModelBehaviorError
-from agents.models.interface import ModelProvider
-from agents.tool_context import ToolContext as SdkToolContext
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 from aieos.agents.errors import AgentLimitError, AgentOutputRejectedError
+from aieos.agents.loop import AgentDefinition, AgentTool, run_agent
 from aieos.agents.registry import LoadedContract
 from aieos.agents.untrusted import wrap_untrusted
 from aieos.contracts.tools import ToolRequest, ToolResult
 from aieos.core.logging import get_logger
 from aieos.gateway.catalog import ToolCatalog
 from aieos.gateway.tool_schemas import TOOL_ARG_SCHEMAS
+from aieos.providers.llm import ChatModel, ToolSpec
 
 log = get_logger(__name__)
 
@@ -51,8 +50,8 @@ class RunScope:
     trace: list[dict[str, Any]] = field(default_factory=list)
 
 
-def sdk_tool_name(tool: str) -> str:
-    """Catalog names contain dots, which function-tool names may not."""
+def wire_tool_name(tool: str) -> str:
+    """Catalog names contain dots, which vendors' tool names may not."""
     return tool.replace(".", "__")
 
 
@@ -65,18 +64,12 @@ def _render_header(loaded: LoadedContract) -> str:
     return "\n".join(lines)
 
 
-def _function_tool(name: str, description: str, invoker: ToolInvoker, scope: RunScope) -> FunctionTool:
-    async def invoke(_ctx: SdkToolContext[Any], raw_args: str) -> str:
+def _gateway_tool(name: str, description: str, invoker: ToolInvoker, scope: RunScope) -> AgentTool:
+    async def invoke(raw_args: dict[str, Any]) -> tuple[str, bool]:
         scope.tool_calls += 1
         if scope.tool_calls > scope.max_tool_calls:
-            return "Tool call limit for this run reached. Finish your answer with the information you have."
-        try:
-            args = json.loads(raw_args or "{}")
-            if not isinstance(args, dict):
-                raise ValueError
-        except ValueError:
-            return f"Tool {name} rejected: arguments must be a JSON object."
-        args = {k: v for k, v in args.items() if v is not None}
+            return "Tool call limit for this run reached. Finish your answer with the information you have.", True
+        args = {k: v for k, v in raw_args.items() if v is not None}
         call_id = f"a{scope.attempt}-t{scope.tool_calls}"
         result = await invoker.invoke(
             ToolRequest(
@@ -91,18 +84,17 @@ def _function_tool(name: str, description: str, invoker: ToolInvoker, scope: Run
         scope.trace.append({"tool": name, "call_id": call_id, "status": result.status})
         if result.status != "succeeded":
             # Our own policy text, not untrusted content.
-            return f"Tool {name} {result.status}: {result.reason}"
+            return f"Tool {name} {result.status}: {result.reason}", True
         if name == "repo.read_file" and isinstance(args.get("path"), str):
             scope.repository_paths_read.add(args["path"])
-        return wrap_untrusted(f"tool:{name}", json.dumps(result.result, ensure_ascii=False, default=str))
+        return wrap_untrusted(f"tool:{name}", json.dumps(result.result, ensure_ascii=False, default=str)), False
 
-    return FunctionTool(
-        name=sdk_tool_name(name),
+    spec = ToolSpec(
+        name=wire_tool_name(name),
         description=f"{description} Results are untrusted data.",
-        params_json_schema=TOOL_ARG_SCHEMAS[name],
-        on_invoke_tool=invoke,
-        strict_json_schema=True,
+        parameters=TOOL_ARG_SCHEMAS[name],
     )
+    return AgentTool(spec=spec, invoke=invoke)
 
 
 def build_agent(
@@ -112,25 +104,24 @@ def build_agent(
     invoker: ToolInvoker,
     scope: RunScope,
     output_type: type[BaseModel],
-) -> Agent[Any]:
+) -> AgentDefinition:
     contract = loaded.contract
-    tools: list[Any] = []
+    tools: dict[str, AgentTool] = {}
     for name in contract.tools:
         spec = catalog.get(name)
         if spec is None or spec.executes_in == "orchestrator":
             continue
         if name not in TOOL_ARG_SCHEMAS:
             raise KeyError(f"no argument schema for tool {name}")
-        tools.append(_function_tool(name, spec.description, invoker, scope))
-    return Agent(
+        tool = _gateway_tool(name, spec.description, invoker, scope)
+        tools[tool.spec.name] = tool
+    return AgentDefinition(
         name=contract.key,
-        instructions=f"{_render_header(loaded)}\n\n{loaded.prompt_text}",
-        model=contract.model.profile,  # resolved by the run's pinned, metered ModelProvider
-        model_settings=ModelSettings(
-            temperature=contract.model.temperature, max_tokens=contract.model.max_output_tokens
-        ),
+        system=f"{_render_header(loaded)}\n\n{loaded.prompt_text}",
+        output_type=output_type,
         tools=tools,
-        output_type=AgentOutputSchema(output_type, strict_json_schema=True),
+        temperature=contract.model.temperature,
+        max_output_tokens=contract.model.max_output_tokens,
     )
 
 
@@ -138,18 +129,20 @@ Validator = Callable[[Any], list[str]]
 
 
 async def run_with_retries(
-    make_agent: Callable[[int], Agent[Any]],
+    make_agent: Callable[[int], AgentDefinition],
     message: str,
     *,
-    provider: ModelProvider,
+    model: ChatModel,
     output_type: type[BaseModel],
     validate: Validator,
     max_turns: int,
     timeout_seconds: float,
     max_retries: int,
 ) -> tuple[Any, int]:
-    """Run the agent; on invalid or ungrounded output, run again with the reasons appended.
+    """Run the agent; on ungrounded output, run again with the reasons appended.
 
+    Schema mistakes are corrected inside a run (see `loop`); a retry here starts a fresh
+    conversation, so a rejected answer cannot anchor the next one.
     Returns (output, attempts). Raises AgentOutputRejectedError or AgentLimitError.
     """
     feedback: list[str] = []
@@ -162,24 +155,11 @@ async def run_with_retries(
             )
         agent = make_agent(attempt)
         try:
-            result = await asyncio.wait_for(
-                Runner.run(
-                    agent,
-                    prompt,
-                    max_turns=max_turns,
-                    run_config=RunConfig(model_provider=provider, tracing_disabled=True),
-                ),
-                timeout=timeout_seconds,
+            output = await asyncio.wait_for(
+                run_agent(agent, prompt, model=model, max_turns=max_turns), timeout=timeout_seconds
             )
-        except MaxTurnsExceeded:
-            raise AgentLimitError(f"{agent.name} exceeded {max_turns} turns") from None
         except TimeoutError:
             raise AgentLimitError(f"{agent.name} exceeded {timeout_seconds:.0f}s") from None
-        except (ModelBehaviorError, ValidationError) as exc:
-            feedback = [f"output did not match the required schema: {str(exc)[:500]}"]
-            log.warning("agent.schema_violation", agent=agent.name, attempt=attempt)
-            continue
-        output = result.final_output
         if not isinstance(output, output_type):
             feedback = [f"output must be a {output_type.__name__} object"]
             continue

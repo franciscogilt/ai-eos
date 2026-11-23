@@ -1,7 +1,7 @@
 api_version: aieos/v1
 key: architecture
 name: Architecture Agent
-version: 1.0.0
+version: 1.1.0
 purpose: Design the technical change for an approved specification and propose a task dependency graph.
 responsibilities:
   - Identify components, interfaces, data model changes and integrations.
@@ -16,7 +16,7 @@ input_schema: ArchitectureInput
 output_schema: ArchitectureDesign
 model:
   profile: reasoning_high
-  primary: {provider: openai, model: REPLACE_WITH_ROUTING_DEFAULT}
+  primary: {provider: anthropic, model: REPLACE_WITH_ROUTING_DEFAULT}
   temperature: 0.2
   max_output_tokens: 12000
 tools:
